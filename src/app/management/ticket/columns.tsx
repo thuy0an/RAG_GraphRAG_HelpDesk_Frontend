@@ -1,7 +1,36 @@
 import {
   Space,
   Button,
+  Tag,
 } from "antd";
+
+const statusColor: Record<string, string> = {
+  OPEN: "blue",
+  IN_PROGRESS: "gold",
+  RESOLVED: "green",
+  CLOSED: "default",
+};
+
+const priorityColor: Record<string, string> = {
+  LOW: "green",
+  MEDIUM: "blue",
+  HIGH: "orange",
+  URGENT: "red",
+};
+
+const priorityLabel: Record<string, string> = {
+  LOW: "Thấp",
+  MEDIUM: "Trung bình",
+  HIGH: "Cao",
+  URGENT: "Khẩn cấp",
+};
+
+const statusLabel: Record<string, string> = {
+  OPEN: "Mở",
+  IN_PROGRESS: "Đang xử lý",
+  RESOLVED: "Đã giải quyết",
+  CLOSED: "Đã đóng",
+};
 
 export const ticketColumns = (props: any) => [
   {
@@ -19,6 +48,22 @@ export const ticketColumns = (props: any) => [
     title: "Danh mục",
     dataIndex: "category",
     key: "category",
+  },
+  {
+    title: "Trạng thái",
+    dataIndex: "status",
+    key: "status",
+    render: (value: string) => (
+      <Tag color={statusColor[value] || "default"}>{statusLabel[value] || value}</Tag>
+    ),
+  },
+  {
+    title: "Mức độ ưu tiên",
+    dataIndex: "priority",
+    key: "priority",
+    render: (value: string) => (
+      <Tag color={priorityColor[value] || "default"}>{priorityLabel[value] || value}</Tag>
+    ),
   },
   {
     title: "Thao tác",

@@ -65,7 +65,7 @@ const STYLES = {
   messageBubble: (isAgent: boolean) => ({
     maxWidth: "70%",
     padding: "10px 14px",
-    borderRadius: "12px",
+    borderRadius: "0",
     background: isAgent ? "#1890ff" : "#fff",
     color: isAgent ? "#fff" : "#000",
     boxShadow: "0 1px 2px rgba(0,0,0,0.1)",
@@ -470,8 +470,8 @@ function ChatRoom({userId, conversationKey, initialMessages }: ChatRoomProps) {
         </div>
       )}
 
-      <div style={STYLES.inputArea}>
-        <div style={{ display: "flex", gap: "8px", alignItems: "flex-end" }}>
+      <div className="p-3 bg-white border-t border-gray-200">
+        <div className="flex items-center gap-2">
           <input
             type="file"
             accept="*"
@@ -485,44 +485,27 @@ function ChatRoom({userId, conversationKey, initialMessages }: ChatRoomProps) {
             icon={<PaperClipOutlined />}
             onClick={() => document.getElementById("fileInput")?.click()}
           />
-
-          <textarea
+          <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage();
-              }
-            }}
+            onKeyDown={(e) => e.key === "Enter" && sendMessage()}
             placeholder="Nhập tin nhắn..."
-            rows={1}
-            style={{
-              flex: 1,
-              resize: "none",
-              padding: "8px",
-              border: "1px solid #d9d9d9",
-              borderRadius: "6px",
-              outline: "none"
-            }}
+            className="flex-1 border border-gray-300 px-3 py-2 rounded-full focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-sm"
           />
-
-          <Button
-            type="primary"
-            icon={<SendOutlined />}
+          <button
             onClick={sendMessage}
             disabled={!input.trim() && previews.length === 0 || isUploading}
-            loading={isUploading}
+            className="bg-blue-500 text-white px-4 py-2 rounded-full hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-sm"
           >
             Gửi
-          </Button>
+          </button>
         </div>
       </div>
     </div>
   );
 }
 
-export function useConversationData(userId: string, activeKey: string) {
+function useConversationData(userId: string, activeKey: string) {
   const {
     data: convs_keys,
     isPending: convsLoading,

@@ -1,0 +1,35 @@
+---
+import Rootlayout from "@/layouts/Rootlayout.astro";
+import LandingHeader from "@/layouts/LandingHeader";
+import LandingFooter from "@/layouts/LandingFooter";
+---
+
+<Rootlayout>
+  <LandingHeader />
+
+  <main class="bg-gradient-to-b from-blue-50 to-white">
+    <section class="mx-auto max-w-6xl px-4 py-16 md:px-6 md:py-24">
+      <div class="grid items-center gap-10 md:grid-cols-2">
+        <div>
+          <p class="mb-3 inline-block rounded-full bg-blue-100 px-3 py-1 text-xs font-semibold text-blue-700">
+            Smart Support Platform
+          </p>
+          <h1 class="mb-4 text-4xl font-bold tracking-tight text-gray-900 md:text-5xl">
+            AI HelpDesk hỗ trợ khách hàng thông minh
+          </h1>
+          <p class="mb-8 text-base leading-7 text-gray-600 md:text-lg">
+            Tạo ticket, theo dõi trạng thái, chat realtime và quản trị tập trung trên một nền tảng duy nhất.
+          </p>
+          <div class="flex flex-wrap gap-3">
+            <a href="/user_portal" class="rounded-md bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-700">
+              Bắt đầu với User Portal
+            </a>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <LandingFooter />
+</Rootlayout>
+

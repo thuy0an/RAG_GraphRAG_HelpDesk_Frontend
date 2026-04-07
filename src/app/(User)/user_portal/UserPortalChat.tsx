@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import { queryClient, useMutation, useQuery } from "@/lib/ReactQuery";
-import { useAuthStore } from "../auth/authStore";
+import { useAuthStore } from "../../auth/authStore";
 import { Button, Empty, Image, message, Spin } from "antd";
 import { PaperClipOutlined, CloseOutlined, FileTextOutlined } from "@ant-design/icons";
 import { PUBLIC_API_BASE_URL, PUBLIC_WS_BASE_URL } from "@/constants/constant";
@@ -33,19 +33,19 @@ interface AIChatHistoryResponse {
   status_code: number;
 }
 
-interface AIChatHistoryHook {
-  messages: Message[];
-  isLoading: boolean;
-  error: string | null;
-  pageInfo: {
-    page_number: number;
-    page_size: number;
-    total_elements: number;
-  };
-  fetchMessages: (page?: number) => void;
-  clearMessages: () => void;
-  loadMore: () => void;
-}
+// interface AIChatHistoryHook {
+//   messages: Message[];
+//   isLoading: boolean;
+//   error: string | null;
+//   pageInfo: {
+//     page_number: number;
+//     page_size: number;
+//     total_elements: number;
+//   };
+//   fetchMessages: (page?: number) => void;
+//   clearMessages: () => void;
+//   loadMore: () => void;
+// }
 
 interface TypingState {
   isTyping: boolean;
@@ -86,7 +86,7 @@ export class CONSTANT {
     messageBubble: (isFromUser: boolean) => ({
       maxWidth: "70%",
       padding: "10px 14px",
-      borderRadius: "12px",
+      borderRadius: "0",
       background: isFromUser ? "#1890ff" : "#fff",
       color: isFromUser ? "#fff" : "#000",
       boxShadow: "0 1px 2px rgba(0,0,0,0.1)",
@@ -112,6 +112,53 @@ export class CONSTANT {
       padding: "16px",
       overflowY: "auto",
       background: "#fafafa",
+    },
+    filePreview: {
+      image: {
+        width: "60px",
+        height: "60px",
+        objectFit: "cover" as const,
+        borderRadius: "5px"
+      },
+      fileIcon: {
+        width: "48px",
+        height: "48px",
+        borderRadius: "50%",
+        backgroundColor: "#0D0D0D",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center"
+      },
+      fileIconSvg: {
+        fontSize: "24px",
+        color: "#F5F5F5",
+        WebkitTextStroke: "1px #000000"
+      },
+      fileName: {
+        width: "80px",
+        wordBreak: "break-word" as const,
+        fontSize: "12px",
+        lineHeight: "1.2",
+        maxHeight: "40px",
+        overflow: "hidden",
+        display: "-webkit-box",
+        WebkitLineClamp: 2,
+        WebkitBoxOrient: "vertical"
+      },
+      fileWrapper: {
+        display: "flex",
+        gap: "8px",
+        alignItems: "center"
+      },
+      container: {
+        position: "relative" as const
+      },
+      removeBtn: {
+        position: "absolute",
+        top: "-6px",
+        right: "-6px",
+        minWidth: "auto"
+      }
     }
   } as const;
 }
@@ -149,26 +196,25 @@ export class Utility {
 
 // ===== SERVICES =====
 export class ChatService {
-  API = {
-    CHAT: {
-      STREAM: `${PUBLIC_API_BASE_URL}/langchain/long_chat`,
+  CHAT_URL = {
+    STREAM: `${PUBLIC_API_BASE_URL}/langchain/retrieve_document`,
 
-      CONVERSATION_KEY: (userId: string) => `${PUBLIC_API_BASE_URL}/chatroom/conversation_key/${userId}`,
+    CONVERSATION_KEY: (userId: string) => `${PUBLIC_API_BASE_URL}/chatroom/conversation_key/${userId}`,
 
-      MESSAGES: (conversation_key: string) => `${PUBLIC_API_BASE_URL}/chatroom/messages/${conversation_key}`,
+    MESSAGES: (conversation_key: string) => `${PUBLIC_API_BASE_URL}/chatroom/messages/${conversation_key}`,
 
-      AI_HISTORY: (sessionId: string) => `${PUBLIC_API_BASE_URL}/langchain/chat_history/${sessionId}`,
-    },
-    STORAGE: {
-      GET_FILES: `${PUBLIC_API_BASE_URL}/storage/files`,
-
-      UPLOAD_FILES: `${PUBLIC_API_BASE_URL}/storage/files/upload`,
-
-      DELETE_FILES: (id: string) => `${PUBLIC_API_BASE_URL}/storage/files/${id}`,
-    }
+    AI_HISTORY: (sessionId: string) => `${PUBLIC_API_BASE_URL}/langchain/chat_history/${sessionId}`,
   }
 
-  WS = {
+  STORAGE_URL =  {
+    GET_FILES: `${PUBLIC_API_BASE_URL}/storage/files`,
+
+    UPLOAD_FILES: `${PUBLIC_API_BASE_URL}/storage/files/upload`,
+
+    DELETE_FILES: (id: string) => `${PUBLIC_API_BASE_URL}/storage/files/${id}`,
+  }
+
+  WS_URL = {
     CHAT: {
       USER_ROOM: (userId: string) => `${PUBLIC_WS_BASE_URL}/ws/${userId}`,
       CONVERSATION_ROOM: (userId: string, conversationKey: string) =>
@@ -177,12 +223,15 @@ export class ChatService {
   }
 
   async *streamChat(prompt: string, sessionId: string) {
-    const res = await fetch(this.API.CHAT.STREAM, {
+    const res = await fetch(this.CHAT_URL.STREAM, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ message: prompt }),
+      body: JSON.stringify({
+        query: prompt,
+        session_id: sessionId || 'anonymous',
+      }),
     });
 
     if (!res.ok) {
@@ -212,7 +261,7 @@ export class ChatService {
   async fetchConversationKey(user_id: string) {
     if (!user_id) return [];
 
-    const url = this.API.CHAT.CONVERSATION_KEY(user_id)
+    const url = this.CHAT_URL.CONVERSATION_KEY(user_id)
     logger.api('GET', url);
 
     const response = await fetch(url);
@@ -229,7 +278,7 @@ export class ChatService {
   async fetchMessages(conversation_key: string) {
     if (!conversation_key || conversation_key === "None") return [];
 
-    const url = this.API.CHAT.MESSAGES(conversation_key)
+    const url = this.CHAT_URL.MESSAGES(conversation_key)
 
     const response = await fetch(url);
     logger.api('GET', url);
@@ -246,7 +295,7 @@ export class ChatService {
   }
 
   async fetchAIChatHistory(sessionId: string) {
-    const url = this.API.CHAT.AI_HISTORY(sessionId);
+    const url = this.CHAT_URL.AI_HISTORY(sessionId);
     logger.api('GET', url);
 
     const response = await fetch(url, {
@@ -267,8 +316,8 @@ export class ChatService {
     return data;
   }
 
-  async sendChatMessage(sessionId: string, message: string): Promise<string> {
-    const url = this.API.CHAT.STREAM;
+  async sendChatMessage(sessionId: string, message: string) {
+    const url = this.CHAT_URL.STREAM;
     logger.api('POST', url);
 
     const response = await fetch(url, {
@@ -278,7 +327,7 @@ export class ChatService {
       },
       body: JSON.stringify({
         session_id: sessionId || 'anonymous',
-        message
+        query: message
       }),
     });
 
@@ -380,7 +429,7 @@ const chatService = new ChatService();
 //     isLoadingMore,
 //     loadMore,
 //     hasMore,
-//   } = useAIChatHistory(sessionId);
+//   } = useAIChatHistoryPagination(sessionId);
 
 //   const [isStreaming, setIsStreaming] = useState(false);
 
@@ -548,7 +597,7 @@ export function useWebSocket(
 
     if (!userId || !conversationKey) return;
 
-    const wsUrl = chatService.WS.CHAT.CONVERSATION_ROOM(userId, conversationKey);
+    const wsUrl = chatService.WS_URL.CHAT.CONVERSATION_ROOM(userId, conversationKey);
     logger.info(`[useWebSocket] Connecting to: ${wsUrl}`);
 
     const ws = new WebSocket(wsUrl);
@@ -632,7 +681,7 @@ export function useWebSocket(
 export async function uploadFiles(files: File[]) {
   const formData = new FormData();
   files.forEach(f => formData.append("files", f));
-  const res = await fetch(chatService.API.STORAGE.UPLOAD_FILES, {
+  const res = await fetch(chatService.STORAGE_URL.UPLOAD_FILES, {
     method: "POST",
     body: formData
   });
@@ -649,45 +698,16 @@ const renderPreviewAttachment = (file: File) => {
       <img
         src={URL.createObjectURL(file)}
         alt={file.name}
-        style={{
-          width: "60px",
-          height: "60px",
-          objectFit: "cover",
-          borderRadius: "5px"
-        }}
+        style={CONSTANT.STYLES.filePreview.image}
       />
     );
   } else {
     return (
-      <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-        <div style={{
-          width: "48px",
-          height: "48px",
-          borderRadius: "50%",
-          backgroundColor: "#0D0D0D",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center"
-        }}>
-          <FileTextOutlined
-            style={{
-              fontSize: '24px',
-              color: '#F5F5F5',
-              WebkitTextStroke: '1px #000000'
-            }}
-          />
+      <div style={CONSTANT.STYLES.filePreview.fileWrapper}>
+        <div style={CONSTANT.STYLES.filePreview.fileIcon}>
+          <FileTextOutlined style={CONSTANT.STYLES.filePreview.fileIconSvg} />
         </div>
-        <div style={{
-          width: "80px",
-          wordBreak: "break-word",
-          fontSize: "12px",
-          lineHeight: "1.2",
-          maxHeight: "40px",
-          overflow: "hidden",
-          display: "-webkit-box",
-          WebkitLineClamp: 2,
-          WebkitBoxOrient: "vertical"
-        }}>
+        <div style={CONSTANT.STYLES.filePreview.fileName}>
           {file.name}
         </div>
       </div>
@@ -708,7 +728,7 @@ function MessageBubble({ msg, currentUserId }: { msg: Message; currentUserId: st
       {isImage ? (
         <div style={{
           maxWidth: "78%",
-          borderRadius: "12px",
+          borderRadius: "0",
           overflow: "hidden"
         }}>
           <Image width={220} src={msg.content} preview />
@@ -718,7 +738,7 @@ function MessageBubble({ msg, currentUserId }: { msg: Message; currentUserId: st
           style={{
             maxWidth: "78%",
             padding: "10px 12px",
-            borderRadius: "18px",
+            borderRadius: "0",
             background: isFromUser ? "#1877f2" : "#ffffff",
             color: isFromUser ? "#fff" : "#111",
             boxShadow: "0 1px 2px rgba(0,0,0,0.08)",
@@ -870,7 +890,7 @@ function AIChatComponent(props: any) {
                 <div style={{
                   maxWidth: "78%",
                   padding: "10px 12px",
-                  borderRadius: "18px",
+                  borderRadius: "0",
                   background: "#ffffff",
                   color: "#111",
                   boxShadow: "0 1px 2px rgba(0,0,0,0.08)",
@@ -1079,9 +1099,9 @@ function NormalChatComponent({
 
       {files.length > 0 && (
         <div className="px-3 pb-2">
-          <div className="flex gap-2 overflow-x-auto py-2">
+          <div className="flex gap-2 overflow-x-auto py-2 pt-4">
             {files.map((file, i) => (
-              <div key={i} className="relative flex-shrink-0">
+              <div key={i} style={CONSTANT.STYLES.filePreview.container}>
                 {renderPreviewAttachment(file)}
                 <Button
                   type="text"
@@ -1089,7 +1109,7 @@ function NormalChatComponent({
                   icon={<CloseOutlined />}
                   size="small"
                   onClick={() => removeFile(i)}
-                  className="absolute -top-1 -right-1 min-w-auto"
+                  style={CONSTANT.STYLES.filePreview.removeBtn}
                 />
               </div>
             ))}
@@ -1136,7 +1156,7 @@ function NormalChatComponent({
 }
 
 // Main User Chat Component
-export function UserChat() {
+export function UserPortalChat() {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatMode, setChatMode] = useState<'ai' | 'chat'>('chat');
   const [chatMessages, setChatMessages] = useState<Message[]>([]);

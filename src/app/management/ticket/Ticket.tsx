@@ -89,9 +89,9 @@ export function TicketManagement() {
   return (
     <>
       <div className='w-full'>
-        <Button type="primary" onClick={handleAddTicket}>
+        {/* <Button type="primary" onClick={handleAddTicket}>
           Thêm mới Ticket
-        </Button>
+        </Button> */}
         <div className=''>
           <Input
             placeholder="Tìm kiếm danh mục..."
@@ -363,7 +363,12 @@ function TicketModal(props: any): any {
             Hủy
           </Button>,
           (props.type !== "view") && (
-            <Button key="submit" type="primary" loading={props.loading} onClick={handleSubmit}>
+            <Button 
+              key="submit" 
+              type="primary" 
+              loading={props.type === 'edit' ? editTicketMutation.isPending : createTicketMutation.isPending} 
+              onClick={handleSubmit}
+            >
               {getModalProps(props.type)?.button}
             </Button>
           )
@@ -508,6 +513,7 @@ function TicketModal(props: any): any {
               Chọn file đính kèm
             </Button> */}
           {/* </div> */}
+          
           <div className='flex'>
             {filePreviews.length > 0 && (
               <div className="flex gap-2 p-2 overflow-x-auto">
