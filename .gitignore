@@ -67,7 +67,7 @@ coverage/
 .github/
 .windsurf/
 .vscode/
-specs
+specs/data
 package-lock.json
 yarn.lock
 pnpm-lock.yaml

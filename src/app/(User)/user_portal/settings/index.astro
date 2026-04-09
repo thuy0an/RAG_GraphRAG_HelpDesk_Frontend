@@ -1,11 +1,11 @@
 ---
 import Rootlayout from "@/layouts/Rootlayout.astro";
-import { UserPortal } from "./UserPortal";
+import { Settings } from "./Settings";
 import { RouteGuard } from "@/components/RouteGuard";
 ---
 
 <Rootlayout>
     <RouteGuard client:only="react">
-        <UserPortal client:only="react"/>
+        <Settings client:only="react"/>
     </RouteGuard>
 </Rootlayout>

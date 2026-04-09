@@ -1,8 +1,11 @@
 ---
 import Rootlayout from "@/layouts/Rootlayout.astro";
 import { ConversationLayout } from "./AgentChat";
+import { RouteGuard } from "@/components/RouteGuard";
 ---
 
 <Rootlayout>
-  <ConversationLayout client:only="react"/>
+  <RouteGuard client:only="react">
+    <ConversationLayout client:only="react"/>
+  </RouteGuard>
 </Rootlayout>

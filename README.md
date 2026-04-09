@@ -1,13 +1,12 @@
 # AI HelpDesk Frontend
 
-Hệ thống hỗ trợ khách hàng thông minh sử dụng AI, được xây dựng với Astro framework.
+Frontend của hệ thống hỗ trợ khách hàng thông minh 
 
 ## 🚀 Project Structure
 
 Cấu trúc thư mục của dự án AI HelpDesk Frontend:
 
-```text
-/
+```
 ├── public/                     # Static assets (images, icons, etc.)
 ├── src/
 │   ├── app/                    # Các trang chính của ứng dụng
@@ -34,12 +33,35 @@ Cấu trúc thư mục của dự án AI HelpDesk Frontend:
 │   │   └── RootLayout.astro
 │   ├── lib/                  # Utility functions
 │   └── styles/               # Global styles
+├── .env                      # Environment variables
 ├── .gitignore
 ├── astro.config.mjs
 ├── package.json
 └── tsconfig.json
+```
 
-## 🧞 Commands
+## 🔧 Environment Variables
+
+Tạo file `.env` tại root directory với các biến sau:
+
+```env
+# API Configuration
+PUBLIC_API_BASE_URL=http://localhost:8080
+
+# WebSocket Configuration
+PUBLIC_WS_BASE_URL=ws://localhost:8080
+
+# Project Environment (development/production)
+PUBLIC_PROJECT_ENV=development
+```
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `PUBLIC_API_BASE_URL` | ✅ | Base URL cho REST API calls |
+| `PUBLIC_WS_BASE_URL` | ✅ | Base URL cho WebSocket connections |
+| `PUBLIC_PROJECT_ENV` | ✅ | Môi trường chạy (development/production) |
+
+## 🚀 Deployment
 | Command                   | Action                                           |
 | :------------------------ | :----------------------------------------------- |
 | `bun install`             | Cài đặt dependencies                            |
@@ -54,4 +76,3 @@ Cấu trúc thư mục của dự án AI HelpDesk Frontend:
 - **Package Manager**: Bun
 - **Styling**: Tailwind CSS (nếu có)
 - **UI Components**: Custom components
-## 🚀 Deployment

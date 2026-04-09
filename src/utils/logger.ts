@@ -7,7 +7,6 @@ const createLogger = (method: keyof Console, prefix: string) => {
 
   const fn = console[method];
 
-  // bind trực tiếp vào console -> giữ line number
   return Function.prototype.bind.call(fn, console, prefix);
 };
 
@@ -27,7 +26,6 @@ export const logger = {
     );
   }) as (method: string, url: string, data?: any) => void,
 
-  // group vẫn giữ line chuẩn nếu bind riêng
   group: createLogger("group", "🔹"),
   groupEnd: console.groupEnd.bind(console),
 };

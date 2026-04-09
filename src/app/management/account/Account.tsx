@@ -105,7 +105,7 @@ async function createAccount(data: CreateAccountRequest) {
 }
 
 async function updateAccount(props: { id: string; data: UpdateAccountRequest }) {
-  const response = await fetch(`${PUBLIC_API_BASE_URL}/auth/${props.id}`, {
+  const response = await fetch(`${PUBLIC_API_BASE_URL}/auth/account/${props.id}`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',

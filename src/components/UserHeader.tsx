@@ -19,8 +19,7 @@ export default function UserHeader() {
       icon: <SettingOutlined />,
       label: 'Cài đặt tài khoản',
       onClick: () => {
-        // TODO: Navigate to settings page
-        console.log('Navigate to settings');
+        window.location.href = '/user_portal/settings';
       },
     },
     {
@@ -35,8 +34,8 @@ export default function UserHeader() {
 
   return (
     <header className="sticky top-0 z-40 border-b border-gray-200 bg-white/95 backdrop-blur">
-      <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 md:px-6">
-        <a href="/user_portal" className="text-lg font-bold text-gray-900">
+      <div className="mx-auto flex h-16 max-w-[80%] items-center justify-between px-4 md:px-6">
+        <a href="/" className="text-lg font-bold text-gray-900">
           AI HelpDesk
         </a>
 

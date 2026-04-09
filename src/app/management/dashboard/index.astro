@@ -1,16 +1,19 @@
 ---
 import Rootlayout from "@/layouts/Rootlayout.astro";
 import { ManagementLayout } from "@/layouts/ManagementLayout";
+import { RouteGuard } from "@/components/RouteGuard";
 // import { DashboardStats } from "@/app/management/dashboard/DashboardStats";
 ---
 
 <Rootlayout>
-  <ManagementLayout>
-    <div class="space-y-6">
-      <div class="flex items-center justify-between">
-        <h1 class="text-3xl font-bold text-gray-900">Dashboard Quản Lý</h1>
+  <RouteGuard client:only="react">
+    <ManagementLayout>
+      <div class="space-y-6">
+        <div class="flex items-center justify-between">
+          <h1 class="text-3xl font-bold text-gray-900">Dashboard Quản Lý</h1>
+        </div>
+        <!-- <DashboardStats client:only="react" /> -->
       </div>
-      <!-- <DashboardStats client:only="react" /> -->
-    </div>
-  </ManagementLayout>
+    </ManagementLayout>
+  </RouteGuard>
 </Rootlayout>

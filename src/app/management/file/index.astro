@@ -1,8 +1,11 @@
 ---
 import Rootlayout from "@/layouts/Rootlayout.astro";
 import { FileLayout } from "./File";
+import { RouteGuard } from "@/components/RouteGuard";
 ---
 
 <Rootlayout>
-  <FileLayout client:only="react"/>
+  <RouteGuard client:only="react">
+    <FileLayout client:only="react"/>
+  </RouteGuard>
 </Rootlayout>

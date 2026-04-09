@@ -2,10 +2,13 @@
 import Rootlayout from "@/layouts/Rootlayout.astro";
 import { TicketManagement } from "./Ticket";
 import { ManagementLayout } from "@/layouts/ManagementLayout";
+import { RouteGuard } from "@/components/RouteGuard";
 ---
 
 <Rootlayout>
-  <ManagementLayout client:only="react">
-      <TicketManagement client:only="react"/>
-  </ManagementLayout>
+  <RouteGuard client:only="react">
+    <ManagementLayout client:only="react">
+        <TicketManagement client:only="react"/>
+    </ManagementLayout>
+  </RouteGuard>
 </Rootlayout>
