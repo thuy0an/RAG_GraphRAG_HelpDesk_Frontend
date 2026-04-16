@@ -16,6 +16,7 @@ interface SignUpData {
   email: string
   password: string
   role: string
+  department_id: string | null
 }
 
 export default function Sign() {
@@ -31,7 +32,8 @@ export default function Sign() {
     username: '',
     email: '',
     password: '',
-    role: 'CUSTOMER'
+    role: 'CUSTOMER',
+    department_id: null
   })
 
   const signInMutation = useMutation({
