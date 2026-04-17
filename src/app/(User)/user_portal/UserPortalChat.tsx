@@ -216,6 +216,11 @@ export class ChatService {
     COMPARE_HISTORY: (sessionId: string) => `${PUBLIC_API_BASE_URL}/langchain/compare/history/${sessionId}`,
     COMPARE_DELETE: (runId: string) => `${PUBLIC_API_BASE_URL}/langchain/compare/history/${runId}`,
 
+    GRAPH_QUERY: `${PUBLIC_API_BASE_URL}/langchain/graph/query`,
+
+    DELETE_PAC: `${PUBLIC_API_BASE_URL}/langchain/delete_document`,
+    DELETE_GRAPH: (source: string) => `${PUBLIC_API_BASE_URL}/langchain/graph/${encodeURIComponent(source)}`,
+
     CONVERSATION_KEY: (userId: string) => `${PUBLIC_API_BASE_URL}/chatroom/conversation_key/${userId}`,
 
     MESSAGES: (conversation_key: string) => `${PUBLIC_API_BASE_URL}/chatroom/messages/${conversation_key}`,
@@ -510,6 +515,46 @@ export class ChatService {
 
     if (!response.ok) {
       throw new Error("Clear vector store failed");
+    }
+
+    return response.json();
+  }
+
+  async deletePaCDocument(filename: string) {
+    const response = await fetch(this.CHAT_URL.DELETE_PAC, {
+      method: "DELETE",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ filename }),
+    });
+
+    if (!response.ok) {
+      throw new Error("Delete PaCRAG document failed");
+    }
+
+    return response.json();
+  }
+
+  async deleteGraphDocument(source: string) {
+    const response = await fetch(this.CHAT_URL.DELETE_GRAPH(source), {
+      method: "DELETE",
+    });
+
+    if (!response.ok) {
+      throw new Error("Delete GraphRAG document failed");
+    }
+
+    return response.json();
+  }
+
+  async deleteAllGraph() {
+    const response = await fetch(`${PUBLIC_API_BASE_URL}/langchain/graph`, {
+      method: "DELETE",
+    });
+
+    if (!response.ok) {
+      throw new Error("Delete all GraphRAG data failed");
     }
 
     return response.json();
@@ -1789,6 +1834,30 @@ export function AIChatWorkspace() {
     }
   });
 
+  const handleDeleteUploadedFile = async (filename: string) => {
+    try {
+      // Xóa PaCRAG vector store và GraphRAG graph song song
+      await Promise.allSettled([
+        chatService.deletePaCDocument(filename),
+        chatService.deleteGraphDocument(filename),
+      ]);
+
+      // Xóa compareRun tương ứng nếu có
+      const matchRun = compareRuns.find((run: any) => run.file_name === filename);
+      if (matchRun) {
+        await chatService.deleteCompareRun(matchRun.id).catch(() => {});
+        queryClient.invalidateQueries({ queryKey: ["compare_history", userId] });
+        if (activeRunId === matchRun.id) setActiveRunId(null);
+      }
+
+      // Xóa khỏi state local
+      setUploadedFiles((prev) => prev.filter((f) => f.name !== filename));
+      message.success(`Đã xóa "${filename}" và dữ liệu nguồn`);
+    } catch (err) {
+      message.error("Xóa file thất bại");
+    }
+  };
+
   const mergedRagMessages = useMemo(() => {
     const normalizeTime = (msg: any) => {
       const raw = msg.created_at || msg.timestamp || "";
@@ -1966,10 +2035,16 @@ export function AIChatWorkspace() {
   };
 
   const handleClearVectorStore = async () => {
-    if (!window.confirm("Bạn có chắc muốn xóa toàn bộ vector store?")) return;
+    if (!window.confirm("Bạn có chắc muốn xóa toàn bộ vector store (PaCRAG + GraphRAG)?")) return;
     try {
-      await clearVectorStore();
-      message.success("Đã xóa vector store");
+      await Promise.allSettled([
+        clearVectorStore(),
+        chatService.deleteAllGraph(),
+      ]);
+      setUploadedFiles([]);
+      queryClient.invalidateQueries({ queryKey: ["compare_history", userId] });
+      setActiveRunId(null);
+      message.success("Đã xóa toàn bộ vector store (PaCRAG + GraphRAG)");
     } catch (err) {
       message.error("Xóa vector store thất bại");
     }
@@ -2094,7 +2169,10 @@ export function AIChatWorkspace() {
                 multiple
                 onChange={(e) => {
                   const incoming = Array.from(e.target.files || []);
-                  let readyFiles: File[] = [];
+                  if (incoming.length === 0) return;
+
+                  const readyFiles: File[] = [];
+
                   setFiles((prev) => {
                     const existingKeys = new Set(
                       prev.map((f) => `${f.file.name}_${f.file.size}_${f.file.lastModified}`)
@@ -2104,7 +2182,12 @@ export function AIChatWorkspace() {
                       const key = `${file.name}_${file.size}_${file.lastModified}`;
                       if (existingKeys.has(key)) return;
                       const ext = file.name.split(".").pop()?.toLowerCase() || "";
-                      const isSupported = ["pdf", "doc", "docx"].includes(ext);
+                      const mime = (file.type || "").toLowerCase();
+                      const isSupported =
+                        ["pdf", "doc", "docx"].includes(ext) ||
+                        mime === "application/pdf" ||
+                        mime === "application/msword" ||
+                        mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
                       next.push({
                         file,
                         enabled: isSupported,
@@ -2116,10 +2199,23 @@ export function AIChatWorkspace() {
                     });
                     return next;
                   });
-                  if (readyFiles.length > 0) {
-                    void handleUploadDocs(readyFiles);
-                  } else if (incoming.length > 0) {
-                    message.error("Không có file hợp lệ để upload");
+
+                  // Tính readyFiles độc lập với setFiles để tránh closure async
+                  const validFiles = incoming.filter((file) => {
+                    const ext = file.name.split(".").pop()?.toLowerCase() || "";
+                    const mime = (file.type || "").toLowerCase();
+                    return (
+                      ["pdf", "doc", "docx"].includes(ext) ||
+                      mime === "application/pdf" ||
+                      mime === "application/msword" ||
+                      mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    );
+                  });
+
+                  if (validFiles.length > 0) {
+                    void handleUploadDocs(validFiles);
+                  } else {
+                    message.error("Không có file hợp lệ để upload (chỉ hỗ trợ PDF, DOC, DOCX)");
                   }
                   e.currentTarget.value = "";
                 }}
@@ -2212,9 +2308,7 @@ export function AIChatWorkspace() {
                       </div>
                       <button
                         className="text-red-500 hover:underline shrink-0"
-                        onClick={() =>
-                          setUploadedFiles((prev) => prev.filter((_, i) => i !== idx))
-                        }
+                        onClick={() => handleDeleteUploadedFile(item.name)}
                       >
                         Xóa
                       </button>
