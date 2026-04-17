@@ -257,7 +257,8 @@ export class ChatService {
     });
 
     if (!res.ok) {
-      throw new Error('Failed to start chat stream');
+      const errText = await res.text();
+      throw new Error(`Failed to start chat stream: ${res.status} ${errText || ""}`.trim());
     }
 
     const reader = res.body?.getReader();
@@ -336,6 +337,17 @@ export class ChatService {
 
     logger.success('[fetchAIChatHistory] data:', data);
     return data;
+  }
+
+  async fetchGraphRAGHistory(sessionId: string) {
+    const url = `${PUBLIC_API_BASE_URL}/langchain/graph/history/${sessionId}`;
+    logger.api('GET', url);
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!response.ok) throw new Error(`Failed to fetch GraphRAG history: ${response.status}`);
+    return response.json();
   }
 
   async sendChatMessage(sessionId: string, message: string) {
@@ -460,13 +472,13 @@ export class ChatService {
     return response.json();
   }
 
-  async graphQuery(query: string, source?: string | null) {
+  async graphQuery(query: string, sessionId: string, source?: string | null) {
     const response = await fetch(this.CHAT_URL.GRAPH_QUERY, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ query, source: source || null }),
+      body: JSON.stringify({ query, source: source || null, session_id: sessionId }),
     });
 
     if (!response.ok) {
@@ -566,11 +578,13 @@ export class MessageFormatter {
   static formatAIHistoryMessages(response: any): Message[] {
     return response.data.map((item: any) => ({
       id: `${item.id}`,
-      sender_id: item.role === 'user' ? 'user' : 'ai-assistant',
+      sender_id: item.role === 'user' ? 'user' :
+                 item.role === 'assistant_rag' ? 'ai-rag' :
+                 item.role === 'assistant_graphrag' ? 'ai-graphrag' : 'ai-assistant',
       content: item.content,
       timestamp: item.timestamp,
-      conversation_key: 'ai-chat',
-      role: item.role,
+      created_at: item.timestamp,
+      role: item.role === 'user' ? 'user' : 'ai',
     }));
   }
 
@@ -725,6 +739,21 @@ export function useAIChatHistory(sessionId: string) {
   };
 }
 
+export function useGraphRAGHistory(sessionId: string) {
+  const { data, isLoading } = useQuery({
+    queryKey: ["graph_chat_history", sessionId],
+    queryFn: () => chatService.fetchGraphRAGHistory(sessionId),
+    enabled: !!sessionId,
+  }, queryClient);
+
+  const messages = useMemo(() => {
+    if (!data) return [];
+    return MessageFormatter.formatAIHistoryMessages(data);
+  }, [data]);
+
+  return { messages, isLoading };
+}
+
 export function useAIChat(sessionId: string) {
   const {
     messages: historyMessages,
@@ -736,37 +765,46 @@ export function useAIChat(sessionId: string) {
   const sendMessage = useCallback(async (text: string, onUpdate: (msg: Message) => void) => {
     if (!text.trim()) return;
 
-    const userMsg: Message = {
-      id: crypto.randomUUID(),
-      content: text,
-      sender_id: sessionId,
-      role: "user",
-      created_at: new Date().toISOString(),
-    };
-
-    onUpdate(userMsg);
-
     setIsStreaming(true);
 
-    let aiMsg: Message = {
-      id: crypto.randomUUID(),
+    const aiMsgId = crypto.randomUUID();
+    let accumulatedContent = "";
+
+    // Thêm placeholder AI message ngay lập tức
+    onUpdate({
+      id: aiMsgId,
       content: "",
       sender_id: "ai-assistant",
       role: "ai",
       created_at: new Date().toISOString(),
-    };
-
-    onUpdate(aiMsg);
+    });
 
     try {
       for await (const chunk of chatService.streamChat(text, sessionId)) {
-        aiMsg.content += chunk;
-        onUpdate({ ...aiMsg });
+        accumulatedContent += chunk;
+        onUpdate({
+          id: aiMsgId,
+          content: accumulatedContent,
+          sender_id: "ai-assistant",
+          role: "ai",
+          created_at: new Date().toISOString(),
+        });
       }
+      console.log(`[PaCRAG] Stream done. content length: ${accumulatedContent.length}`);
     } catch (err) {
       console.error(err);
+      const errMsg = err instanceof Error ? err.message : "PaCRAG không phản hồi.";
+      onUpdate({
+        id: aiMsgId,
+        content: `PaCRAG không trả lời được. ${errMsg}`,
+        sender_id: "ai-assistant",
+        role: "ai",
+        created_at: new Date().toISOString(),
+      });
     } finally {
       setIsStreaming(false);
+      // Invalidate history để fetch lại từ server sau khi stream xong
+      queryClient.invalidateQueries({ queryKey: ["ai_chat_history", sessionId] });
     }
   }, [sessionId]);
 
@@ -941,14 +979,24 @@ function MessageBubble({ msg, currentUserId }: { msg: Message; currentUserId: st
   const isImage = isUrl && Utility.isImageUrl(msg.content);
   const isDocument = isUrl && Utility.isDocumentUrl(msg.content);
 
+  // Tách phần nguồn ra khỏi nội dung chính (dòng bắt đầu bằng "- Nguồn:" hoặc "Nguồn:")
+  const { mainContent, sourceLines } = (() => {
+    if (isFromUser || !msg.content) return { mainContent: msg.content, sourceLines: [] };
+    const lines = msg.content.split("\n");
+    const sourceStart = lines.findIndex(l =>
+      /^[-–]?\s*(Nguồn|Source)\s*:/i.test(l.trim())
+    );
+    if (sourceStart === -1) return { mainContent: msg.content, sourceLines: [] };
+    return {
+      mainContent: lines.slice(0, sourceStart).join("\n").trim(),
+      sourceLines: lines.slice(sourceStart).filter(l => l.trim()),
+    };
+  })();
+
   return (
-    <div className={`flex ${isFromUser ? "justify-end" : "justify-start"}`}>
+    <div className={`flex mb-3 ${isFromUser ? "justify-end" : "justify-start"}`}>
       {isImage ? (
-        <div style={{
-          maxWidth: "78%",
-          borderRadius: "0",
-          overflow: "hidden"
-        }}>
+        <div style={{ maxWidth: "78%", borderRadius: "0", overflow: "hidden" }}>
           <Image width={220} src={msg.content} preview />
         </div>
       ) : (
@@ -978,9 +1026,18 @@ function MessageBubble({ msg, currentUserId }: { msg: Message; currentUserId: st
           ) : isFromUser ? (
             <div className="text-sm">{msg.content}</div>
           ) : (
-            <div className="text-sm markdown-body">
-              <ReactMarkdown>{msg.content}</ReactMarkdown>
-            </div>
+            <>
+              <div className="text-sm markdown-body">
+                <ReactMarkdown>{mainContent}</ReactMarkdown>
+              </div>
+              {sourceLines.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-gray-100 text-[11px] text-gray-500 space-y-0.5">
+                  {sourceLines.map((line, i) => (
+                    <div key={i}>{line}</div>
+                  ))}
+                </div>
+              )}
+            </>
           )}
 
           {msg.created_at && (
@@ -1805,6 +1862,8 @@ export function AIChatWorkspace() {
     sendMessage
   } = useAIChat(userId);
 
+  const { messages: graphHistoryMessages } = useGraphRAGHistory(userId);
+
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<Array<{ file: File; enabled: boolean; error?: string }>>([]);
   const [activeToolSections, setActiveToolSections] = useState<string[]>(["upload", "chunk", "files"]);
@@ -1815,11 +1874,13 @@ export function AIChatWorkspace() {
     child_chunk_size: 512,
     child_chunk_overlap: 100,
   });
+  const [pendingChunkConfig, setPendingChunkConfig] = useState(chunkConfig);
 
   const [graphMessages, setGraphMessages] = useState<Message[]>([]);
   const [ragMessages, setRagMessages] = useState<Message[]>([]);
   const [isGraphThinking, setIsGraphThinking] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+  const [showHistorySidebar, setShowHistorySidebar] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState<Array<{ name: string; selected: boolean }>>(() => {
     try {
       const raw = localStorage.getItem(storageKey);
@@ -1835,6 +1896,7 @@ export function AIChatWorkspace() {
   });
 
   const handleDeleteUploadedFile = async (filename: string) => {
+    if (!window.confirm(`Bạn có chắc muốn xóa "${filename}" và toàn bộ dữ liệu nguồn liên quan?`)) return;
     try {
       // Xóa PaCRAG vector store và GraphRAG graph song song
       await Promise.allSettled([
@@ -1858,26 +1920,18 @@ export function AIChatWorkspace() {
     }
   };
 
+  // Không clear local messages - luôn giữ nội dung, dedup theo id khi merge với history
+
+  const mergedGraphMessages = useMemo(() => {
+    const historyIds = new Set(graphHistoryMessages.map((m: any) => m.id));
+    const localOnly = graphMessages.filter((m: any) => !historyIds.has(m.id));
+    return [...graphHistoryMessages, ...localOnly];
+  }, [graphHistoryMessages, graphMessages]);
+
   const mergedRagMessages = useMemo(() => {
-    const normalizeTime = (msg: any) => {
-      const raw = msg.created_at || msg.timestamp || "";
-      const date = new Date(raw);
-      if (Number.isNaN(date.getTime())) return "";
-      return date.toISOString().slice(0, 16);
-    };
-
-    const seen = new Set<string>();
-    const merged: Message[] = [];
-
-    [...historyMessages, ...ragMessages].forEach((msg: any) => {
-      const timeKey = normalizeTime(msg);
-      const key = `${msg.role || ""}|${msg.sender_id || ""}|${msg.content || ""}|${timeKey}`;
-      if (seen.has(key)) return;
-      seen.add(key);
-      merged.push(msg);
-    });
-
-    return merged;
+    const historyIds = new Set(historyMessages.map((m: any) => m.id));
+    const localOnly = ragMessages.filter((m: any) => !historyIds.has(m.id));
+    return [...historyMessages, ...localOnly];
   }, [historyMessages, ragMessages]);
 
   const messagesRef = useRef<HTMLDivElement>(null);
@@ -2024,11 +2078,19 @@ export function AIChatWorkspace() {
   };
 
   const handleClearHistory = async () => {
-    if (!window.confirm("Bạn có chắc muốn xóa toàn bộ lịch sử chat?")) return;
+    if (!window.confirm("Bạn có chắc muốn xóa toàn bộ lịch sử chat (PaCRAG + GraphRAG)?")) return;
     try {
-      await clearHistory(userId || "anonymous");
-      message.success("Đã xóa lịch sử chat");
+      await Promise.allSettled([
+        clearHistory(userId || "anonymous"),
+        chatService.fetchGraphRAGHistory(userId).then(() =>
+          fetch(`${PUBLIC_API_BASE_URL}/langchain/graph/history/${userId || "anonymous"}`, { method: "DELETE" })
+        ),
+      ]);
+      queryClient.invalidateQueries({ queryKey: ["ai_chat_history", userId] });
+      queryClient.invalidateQueries({ queryKey: ["graph_chat_history", userId] });
+      setRagMessages([]);
       setGraphMessages([]);
+      message.success("Đã xóa lịch sử chat (PaCRAG + GraphRAG)");
     } catch (err) {
       message.error("Xóa lịch sử thất bại");
     }
@@ -2075,8 +2137,10 @@ export function AIChatWorkspace() {
     };
 
     setGraphMessages((prev) => [...prev, userMsg]);
+    setRagMessages((prev: any) => [...prev, userMsg]);
 
     sendMessage(input, (msg: any) => {
+      if (msg.role === "user") return;
       setRagMessages((prev: any) => {
         const exist = prev.find((m: any) => m.id === msg.id);
         if (exist) {
@@ -2086,9 +2150,18 @@ export function AIChatWorkspace() {
       });
     });
 
-    const appendGraphAnswer = (answer: string, sources?: string[]) => {
+    const appendGraphAnswer = (answer: string, sources?: Array<string | { filename?: string; pages?: Array<number | string> }>) => {
       const sourceLines = sources && sources.length > 0
-        ? `\n\nNguồn: ${sources.join(", ")}`
+        ? "\n\n" + sources.flatMap((source) => {
+            if (typeof source === "string") {
+              return [`- Nguồn: ${source}`];
+            }
+
+            const filename = source?.filename || "Không rõ";
+            const pages = Array.isArray(source?.pages) ? source.pages : [];
+            const pageText = pages.length > 0 ? pages.join(", ") : "không xác định";
+            return [`- Nguồn: ${filename}`, `- Trang: ${pageText}`];
+          }).join("\n")
         : "";
       setGraphMessages((prev) => [
         ...prev,
@@ -2113,11 +2186,12 @@ export function AIChatWorkspace() {
           if (graphAnswer) {
             appendGraphAnswer(graphAnswer, run?.graphrag_query?.sources);
             setIsGraphThinking(false);
+            queryClient.invalidateQueries({ queryKey: ["graph_chat_history", userId] });
             return;
           }
         }
 
-        const fallback = await chatService.graphQuery(input, selectedSource);
+        const fallback = await chatService.graphQuery(input, userId || "anonymous", selectedSource);
         const answer = fallback?.data?.answer || "";
         if (answer) {
           appendGraphAnswer(answer, fallback?.data?.sources);
@@ -2128,6 +2202,7 @@ export function AIChatWorkspace() {
         appendGraphAnswer("GraphRAG không trả lời được.");
       }
       setIsGraphThinking(false);
+      queryClient.invalidateQueries({ queryKey: ["graph_chat_history", userId] });
     })();
 
     setInput("");
@@ -2144,7 +2219,8 @@ export function AIChatWorkspace() {
   return (
     <div className="min-h-screen flex flex-col smartchatbot-shell">
       <UserHeader />
-      <div className="flex-1 p-4 min-h-0 flex flex-col">
+      <div className="flex-1 flex flex-col" style={{ minHeight: 0 }}>
+        <div className="p-4 pb-0">
         <div className="mb-3 rounded-2xl smartchatbot-frame p-3">
           <div
             className="flex flex-wrap items-center justify-between gap-3 cursor-pointer select-none"
@@ -2320,7 +2396,7 @@ export function AIChatWorkspace() {
           </div>
           )}
         </div>
-        <div className="flex-1 rounded-2xl smartchatbot-frame flex min-h-0">
+        <div className="flex-1 rounded-2xl smartchatbot-frame flex min-h-0" style={{ height: "calc(100vh - 220px)" }}>
           {/* Left tools */}
           <div className="w-[280px] border-r border-gray-200 smartchatbot-panel p-3 flex flex-col gap-3">
             <div className="smartchatbot-panel-header">Thanh công cụ</div>
@@ -2348,6 +2424,14 @@ export function AIChatWorkspace() {
                     disabled={isClearingHistory}
                   >
                     <HistoryOutlined />
+                  </button>
+                </Tooltip>
+                <Tooltip title={showHistorySidebar ? "Ẩn lịch sử" : "Xem lịch sử chat"}>
+                  <button
+                    className={`smartchatbot-toolbtn ${showHistorySidebar ? "border-green-400 bg-green-50" : ""}`}
+                    onClick={() => setShowHistorySidebar(prev => !prev)}
+                  >
+                    <FileTextOutlined />
                   </button>
                 </Tooltip>
                 <Tooltip title="Xóa vector store">
@@ -2378,10 +2462,10 @@ export function AIChatWorkspace() {
                             Parent chunk size
                             <input
                               type="number"
-                              value={chunkConfig.parent_chunk_size}
+                              value={pendingChunkConfig.parent_chunk_size}
                               min={200}
                               onChange={(e) =>
-                                setChunkConfig((prev) => ({
+                                setPendingChunkConfig((prev) => ({
                                   ...prev,
                                   parent_chunk_size: Number(e.target.value),
                                 }))
@@ -2393,10 +2477,10 @@ export function AIChatWorkspace() {
                             Parent overlap
                             <input
                               type="number"
-                              value={chunkConfig.parent_chunk_overlap}
+                              value={pendingChunkConfig.parent_chunk_overlap}
                               min={0}
                               onChange={(e) =>
-                                setChunkConfig((prev) => ({
+                                setPendingChunkConfig((prev) => ({
                                   ...prev,
                                   parent_chunk_overlap: Number(e.target.value),
                                 }))
@@ -2408,10 +2492,10 @@ export function AIChatWorkspace() {
                             Child chunk size
                             <input
                               type="number"
-                              value={chunkConfig.child_chunk_size}
+                              value={pendingChunkConfig.child_chunk_size}
                               min={100}
                               onChange={(e) =>
-                                setChunkConfig((prev) => ({
+                                setPendingChunkConfig((prev) => ({
                                   ...prev,
                                   child_chunk_size: Number(e.target.value),
                                 }))
@@ -2423,10 +2507,10 @@ export function AIChatWorkspace() {
                             Child overlap
                             <input
                               type="number"
-                              value={chunkConfig.child_chunk_overlap}
+                              value={pendingChunkConfig.child_chunk_overlap}
                               min={0}
                               onChange={(e) =>
-                                setChunkConfig((prev) => ({
+                                setPendingChunkConfig((prev) => ({
                                   ...prev,
                                   child_chunk_overlap: Number(e.target.value),
                                 }))
@@ -2434,6 +2518,15 @@ export function AIChatWorkspace() {
                               className="border border-gray-300 rounded px-2 py-1"
                             />
                           </label>
+                          <button
+                            className="mt-1 w-full py-1.5 rounded-lg text-xs font-semibold text-white smartchatbot-cta hover:brightness-110 transition"
+                            onClick={() => {
+                              setChunkConfig(pendingChunkConfig);
+                              message.success("Đã áp dụng cấu hình chunk");
+                            }}
+                          >
+                            Apply
+                          </button>
                         </div>
                       ),
                     },
@@ -2494,11 +2587,11 @@ export function AIChatWorkspace() {
                     ref={graphMessagesRef}
                     onScroll={handleGraphScroll}
                   >
-                    {graphMessages.length === 0 ? (
+                    {mergedGraphMessages.length === 0 ? (
                       <Empty description="Bắt đầu trò chuyện với GraphRAG" style={{ marginTop: "80px" }} />
                     ) : (
                       <>
-                        {graphMessages.map((m: any) => (
+                        {mergedGraphMessages.map((m: any) => (
                           <MessageBubble key={m.id} msg={m} currentUserId={userId} />
                         ))}
                         {(isComparingQuery || isGraphThinking) && (
@@ -2553,88 +2646,167 @@ export function AIChatWorkspace() {
             </div>
           </div>
 
-          {/* Right: Compare metrics */}
-          <div className="w-[300px] border-l border-gray-200 smartchatbot-panel flex flex-col">
-            <div className="px-3 py-2 border-b border-gray-200 text-sm font-semibold bg-white">
-              So sánh PaCRAG vs GraphRAG
-            </div>
-            <div className="flex-1 overflow-auto p-3 text-xs space-y-3">
-              {isCompareHistoryLoading ? (
-                <div>Đang tải lịch sử...</div>
-              ) : compareRuns.length === 0 ? (
-                <div>Chưa có dữ liệu so sánh</div>
-              ) : (
-                <div
-                  className="space-y-2 smartchatbot-compare-scroll"
-                >
-                  {compareRuns.map((run: any) => (
-                    <div
-                      key={run.id}
-                      className={`border rounded p-2 cursor-pointer ${activeRunId === run.id ? "border-blue-500" : "border-gray-200"}`}
-                      onClick={() => setActiveRunId(run.id)}
-                    >
-                      <div className="font-semibold truncate">{run.file_name}</div>
-                      <div className="text-[10px] text-gray-500">{run.created_at || ""}</div>
-                      <div className="mt-1 flex justify-between">
-                        <span>PaC {run.pac_ingest?.time_total_s ?? "-"}s</span>
-                        <span>Graph {run.graphrag_ingest?.time_total_s ?? "-"}s</span>
+          {/* Right: History Sidebar */}
+          {showHistorySidebar && (
+            <div className="w-[280px] border-l border-gray-200 smartchatbot-panel flex flex-col">
+              <div className="px-3 py-2 border-b border-gray-200 text-sm font-semibold bg-white flex items-center justify-between">
+                <span>Lịch sử chat</span>
+                <button
+                  className="text-gray-400 hover:text-gray-600 text-xs"
+                  onClick={() => setShowHistorySidebar(false)}
+                >✕</button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-2 text-xs space-y-1 smartchatbot-chat-scroll">
+                {mergedRagMessages.length === 0 && mergedGraphMessages.length === 0 ? (
+                  <div className="text-gray-400 p-2">Chưa có lịch sử chat</div>
+                ) : (
+                  <>
+                    {/* PaCRAG history */}
+                    {mergedRagMessages.filter((m: any) => m.role === 'user').length > 0 && (
+                      <div className="mb-2">
+                        <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide px-1 mb-1">PaCRAG</div>
+                        {mergedRagMessages
+                          .filter((m: any) => m.role === 'user')
+                          .map((m: any, i: number) => (
+                            <div
+                              key={m.id || i}
+                              className="px-2 py-1.5 rounded-lg hover:bg-gray-100 cursor-pointer text-gray-700 truncate"
+                              title={m.content}
+                            >
+                              <span className="text-blue-500 mr-1">Q:</span>
+                              {m.content?.slice(0, 60)}{m.content?.length > 60 ? "..." : ""}
+                            </div>
+                          ))}
                       </div>
-                      <Button
-                        size="small"
-                        danger
-                        className="mt-2"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeleteCompareRun(run.id);
-                        }}
-                      >
-                        Xóa
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              )}
+                    )}
+                    {/* GraphRAG history */}
+                    {mergedGraphMessages.filter((m: any) => m.role === 'user').length > 0 && (
+                      <div>
+                        <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide px-1 mb-1">GraphRAG</div>
+                        {mergedGraphMessages
+                          .filter((m: any) => m.role === 'user')
+                          .map((m: any, i: number) => (
+                            <div
+                              key={m.id || i}
+                              className="px-2 py-1.5 rounded-lg hover:bg-gray-100 cursor-pointer text-gray-700 truncate"
+                              title={m.content}
+                            >
+                              <span className="text-green-500 mr-1">Q:</span>
+                              {m.content?.slice(0, 60)}{m.content?.length > 60 ? "..." : ""}
+                            </div>
+                          ))}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+              <div className="p-2 border-t border-gray-100">
+                <button
+                  className="w-full py-1.5 text-xs text-red-500 hover:bg-red-50 rounded-lg transition"
+                  onClick={handleClearHistory}
+                  disabled={isClearingHistory}
+                >
+                  Xóa toàn bộ lịch sử
+                </button>
+              </div>
+            </div>
+          )}
 
+          {/* Right: Compare metrics - đã chuyển xuống dưới */}
+        </div>
+      </div>
+        </div>{/* end p-4 pb-0 */}
+
+      {/* So sánh PaCRAG vs GraphRAG - section riêng bên dưới */}
+      <div className="mx-4 mb-4 rounded-2xl smartchatbot-frame">
+        <div className="px-4 py-3 border-b border-gray-200 text-sm font-semibold bg-white rounded-t-2xl">
+          So sánh PaCRAG vs GraphRAG
+        </div>
+        <div className="p-4 text-xs">
+          {isCompareHistoryLoading ? (
+            <div className="text-gray-400">Đang tải lịch sử...</div>
+          ) : compareRuns.length === 0 ? (
+            <div className="text-gray-400">Chưa có dữ liệu so sánh. Upload file để bắt đầu so sánh.</div>
+          ) : (
+            <div className="space-y-4">
+              {/* Danh sách runs */}
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                {compareRuns.map((run: any) => (
+                  <div
+                    key={run.id}
+                    className={`border rounded-xl p-3 cursor-pointer transition hover:shadow-sm ${activeRunId === run.id ? "border-blue-500 bg-blue-50" : "border-gray-200 bg-white"}`}
+                    onClick={() => setActiveRunId(run.id)}
+                  >
+                    <div className="font-semibold truncate text-xs">{run.file_name}</div>
+                    <div className="text-[10px] text-gray-400 mt-0.5">{run.created_at || ""}</div>
+                    <div className="mt-2 flex justify-between text-[11px]">
+                      <span className="text-blue-600">PaC {run.pac_ingest?.time_total_s ?? "-"}s</span>
+                      <span className="text-purple-600">Graph {run.graphrag_ingest?.time_total_s ?? "-"}s</span>
+                    </div>
+                    <Button
+                      size="small"
+                      danger
+                      className="mt-2 w-full"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteCompareRun(run.id);
+                      }}
+                    >
+                      Xóa
+                    </Button>
+                  </div>
+                ))}
+              </div>
+
+              {/* Chi tiết run đang chọn */}
               {activeRun && (
-                <div className="space-y-2">
-                  <div className="font-semibold">Kết quả ingest</div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div className="border rounded p-2">
-                      <div className="font-semibold">PaCRAG</div>
-                      <div>Time: {activeRun.pac_ingest?.time_total_s ?? "-"}s</div>
-                      <div>Parent: {activeRun.pac_ingest?.parent_chunks ?? "-"}</div>
-                      <div>Child: {activeRun.pac_ingest?.child_chunks ?? "-"}</div>
+                <div className="border border-gray-200 rounded-xl p-4 bg-white space-y-4">
+                  <div className="font-semibold text-sm">
+                    Chi tiết: <span className="text-blue-600">{activeRun.file_name}</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <div className="font-semibold text-xs text-gray-500 uppercase mb-2">Kết quả Ingest</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="border rounded-lg p-3 bg-blue-50">
+                          <div className="font-semibold text-blue-700 mb-1">PaCRAG</div>
+                          <div>Time: {activeRun.pac_ingest?.time_total_s ?? "-"}s</div>
+                          <div>Parent: {activeRun.pac_ingest?.parent_chunks ?? "-"}</div>
+                          <div>Child: {activeRun.pac_ingest?.child_chunks ?? "-"}</div>
+                        </div>
+                        <div className="border rounded-lg p-3 bg-purple-50">
+                          <div className="font-semibold text-purple-700 mb-1">GraphRAG</div>
+                          <div>Time: {activeRun.graphrag_ingest?.time_total_s ?? "-"}s</div>
+                          <div>Chunks: {activeRun.graphrag_ingest?.chunks ?? "-"}</div>
+                          <div>Sections: {activeRun.graphrag_ingest?.sections ?? "-"}</div>
+                          <div>Entities: {activeRun.graphrag_ingest?.entities ?? "-"}</div>
+                          <div>Relations: {activeRun.graphrag_ingest?.relations ?? "-"}</div>
+                        </div>
+                      </div>
                     </div>
-                    <div className="border rounded p-2">
-                      <div className="font-semibold">GraphRAG</div>
-                      <div>Time: {activeRun.graphrag_ingest?.time_total_s ?? "-"}s</div>
-                      <div>Chunks: {activeRun.graphrag_ingest?.chunks ?? "-"}</div>
-                      <div>Sections: {activeRun.graphrag_ingest?.sections ?? "-"}</div>
-                      <div>Entities: {activeRun.graphrag_ingest?.entities ?? "-"}</div>
-                      <div>Relations: {activeRun.graphrag_ingest?.relations ?? "-"}</div>
+                    <div>
+                      <div className="font-semibold text-xs text-gray-500 uppercase mb-2">Kết quả Query</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="border rounded-lg p-3 bg-blue-50">
+                          <div className="font-semibold text-blue-700 mb-1">PaCRAG</div>
+                          <div>Time: {activeRun.pac_query?.time_total_s ?? "-"}s</div>
+                          <div>Tokens: {activeRun.pac_query?.answer_tokens ?? "-"}</div>
+                        </div>
+                        <div className="border rounded-lg p-3 bg-purple-50">
+                          <div className="font-semibold text-purple-700 mb-1">GraphRAG</div>
+                          <div>Time: {activeRun.graphrag_query?.time_total_s ?? "-"}s</div>
+                          <div>Tokens: {activeRun.graphrag_query?.answer_tokens ?? "-"}</div>
+                        </div>
+                      </div>
+                      {isComparingQuery && (
+                        <div className="mt-2 text-blue-500">Đang so sánh query...</div>
+                      )}
                     </div>
                   </div>
-
-                  <div className="font-semibold">Kết quả query</div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div className="border rounded p-2">
-                      <div className="font-semibold">PaCRAG</div>
-                      <div>Time: {activeRun.pac_query?.time_total_s ?? "-"}s</div>
-                      <div>Tokens: {activeRun.pac_query?.answer_tokens ?? "-"}</div>
-                    </div>
-                    <div className="border rounded p-2">
-                      <div className="font-semibold">GraphRAG</div>
-                      <div>Time: {activeRun.graphrag_query?.time_total_s ?? "-"}s</div>
-                      <div>Tokens: {activeRun.graphrag_query?.answer_tokens ?? "-"}</div>
-                    </div>
-                  </div>
-                  {isComparingQuery && (
-                    <div className="text-xs text-blue-500">Đang so sánh query...</div>
-                  )}
                 </div>
               )}
             </div>
-          </div>
+          )}
         </div>
       </div>
     </div>
