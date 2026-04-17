@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
+import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { queryClient, useMutation, useQuery } from "@/lib/ReactQuery";
 import { useAuthStore } from "../../auth/authStore";
@@ -86,6 +87,31 @@ export type {
   TypingState,
   WebSocketHookReturn,
   ChatModeToggleProps
+}
+
+interface RetrievedPassage {
+  content: string;
+  filename: string;
+  pages: number[];
+}
+
+interface QueryMetrics {
+  answer?: string;
+  time_total_s?: number | null;
+  answer_tokens?: number | null;
+  word_count?: number | null;
+  relevance_score?: number | null;
+  source_coverage?: number | null;
+  retrieved_chunk_count?: number | null;
+  retrieved_chunks?: RetrievedPassage[];   // PaCRAG
+  doc_passages?: RetrievedPassage[];       // GraphRAG
+  sources?: { filename: string; pages: number[] }[];
+}
+
+interface CitationModalState {
+  open: boolean;
+  passage: RetrievedPassage | null;
+  query: string;
 }
 
 // ===== CONSTANTS =====
@@ -204,6 +230,26 @@ export class Utility {
   };
 }
 
+type MetricKey = 'time_total_s' | 'relevance_score' | 'source_coverage' | 'word_count';
+
+export function isBetter(
+  metric: MetricKey,
+  side: 'pac' | 'graph',
+  pac: QueryMetrics | null | undefined,
+  graph: QueryMetrics | null | undefined
+): boolean {
+  const pacVal = pac?.[metric] ?? null;
+  const graphVal = graph?.[metric] ?? null;
+  if (pacVal === null || graphVal === null) return false;
+  if (pacVal === graphVal) return false;
+  // time_total_s: thấp hơn là tốt hơn
+  if (metric === 'time_total_s') {
+    return side === 'pac' ? pacVal < graphVal : graphVal < pacVal;
+  }
+  // Các metric còn lại: cao hơn là tốt hơn
+  return side === 'pac' ? pacVal > graphVal : graphVal > pacVal;
+}
+
 // ===== SERVICES =====
 export class ChatService {
   CHAT_URL = {
@@ -244,7 +290,7 @@ export class ChatService {
     }
   }
 
-  async *streamChat(prompt: string, sessionId: string) {
+  async *streamChat(prompt: string, sessionId: string, turnId?: string) {
     const res = await fetch(this.CHAT_URL.STREAM, {
       method: 'POST',
       headers: {
@@ -253,6 +299,8 @@ export class ChatService {
       body: JSON.stringify({
         query: prompt,
         session_id: sessionId || 'anonymous',
+        // Nếu có turn_id (từ compare flow), truyền xuống để không tạo turn mới
+        ...(turnId ? { turn_id: turnId, save_history: false } : {}),
       }),
     });
 
@@ -472,13 +520,19 @@ export class ChatService {
     return response.json();
   }
 
-  async graphQuery(query: string, sessionId: string, source?: string | null) {
+  async graphQuery(query: string, sessionId: string, source?: string | null, turnId?: string) {
     const response = await fetch(this.CHAT_URL.GRAPH_QUERY, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ query, source: source || null, session_id: sessionId }),
+      body: JSON.stringify({
+        query,
+        source: source || null,
+        session_id: sessionId,
+        // Nếu có turn_id, truyền xuống để update graphrag_content vào đúng turn
+        ...(turnId ? { turn_id: turnId, save_history: false } : {}),
+      }),
     });
 
     if (!response.ok) {
@@ -576,8 +630,10 @@ export class ChatService {
 // ===== FORMATTERS =====
 export class MessageFormatter {
   static formatAIHistoryMessages(response: any): Message[] {
-    return response.data.map((item: any) => ({
+    const items: any[] = response?.data || [];
+    return items.map((item: any) => ({
       id: `${item.id}`,
+      turn_id: item.turn_id,
       sender_id: item.role === 'user' ? 'user' :
                  item.role === 'assistant_rag' ? 'ai-rag' :
                  item.role === 'assistant_graphrag' ? 'ai-graphrag' : 'ai-assistant',
@@ -721,6 +777,7 @@ export function useAIChatHistory(sessionId: string) {
     isLoading,
     isError,
     error,
+    refetch,
   } = useQuery({
     queryKey: ["ai_chat_history", sessionId],
     queryFn: () => chatService.fetchAIChatHistory(sessionId),
@@ -735,12 +792,13 @@ export function useAIChatHistory(sessionId: string) {
   return {
     messages,
     isLoading,
+    refetch,
     error: (error as Error)?.message || null,
   };
 }
 
 export function useGraphRAGHistory(sessionId: string) {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, refetch } = useQuery({
     queryKey: ["graph_chat_history", sessionId],
     queryFn: () => chatService.fetchGraphRAGHistory(sessionId),
     enabled: !!sessionId,
@@ -751,7 +809,7 @@ export function useGraphRAGHistory(sessionId: string) {
     return MessageFormatter.formatAIHistoryMessages(data);
   }, [data]);
 
-  return { messages, isLoading };
+  return { messages, isLoading, refetch };
 }
 
 export function useAIChat(sessionId: string) {
@@ -762,15 +820,17 @@ export function useAIChat(sessionId: string) {
 
   const [isStreaming, setIsStreaming] = useState(false);
 
-  const sendMessage = useCallback(async (text: string, onUpdate: (msg: Message) => void) => {
-    if (!text.trim()) return;
+  const sendMessage = useCallback(async (
+    text: string,
+    onUpdate: (msg: Message) => void,
+  ): Promise<string> => {
+    if (!text.trim()) return "";
 
     setIsStreaming(true);
 
     const aiMsgId = crypto.randomUUID();
     let accumulatedContent = "";
 
-    // Thêm placeholder AI message ngay lập tức
     onUpdate({
       id: aiMsgId,
       content: "",
@@ -790,22 +850,24 @@ export function useAIChat(sessionId: string) {
           created_at: new Date().toISOString(),
         });
       }
-      console.log(`[PaCRAG] Stream done. content length: ${accumulatedContent.length}`);
     } catch (err) {
       console.error(err);
       const errMsg = err instanceof Error ? err.message : "PaCRAG không phản hồi.";
+      const errorContent = `PaCRAG không trả lời được. ${errMsg}`;
       onUpdate({
         id: aiMsgId,
-        content: `PaCRAG không trả lời được. ${errMsg}`,
+        content: errorContent,
         sender_id: "ai-assistant",
         role: "ai",
         created_at: new Date().toISOString(),
       });
+      accumulatedContent = errorContent;
     } finally {
       setIsStreaming(false);
-      // Invalidate history để fetch lại từ server sau khi stream xong
-      queryClient.invalidateQueries({ queryKey: ["ai_chat_history", sessionId] });
     }
+
+    // Trả về full answer để caller dùng cho save_turn
+    return accumulatedContent;
   }, [sessionId]);
 
   return {
@@ -948,6 +1010,68 @@ export async function uploadFiles(files: File[]) {
 }
 
 // ===== UI COMPONENTS =====
+// Quality Badge Component
+function QualityBadge({ show }: { show: boolean }) {
+  if (!show) return null;
+  return (
+    <span className="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-700">
+      ✓ Tốt hơn
+    </span>
+  );
+}
+
+// Citation Modal Component
+function CitationModal({ state, onClose }: { state: CitationModalState; onClose: () => void }) {
+  if (!state.open) return null;
+
+  const highlightContent = (content: string, query: string): ReactNode => {
+    const words = query.split(/\s+/).filter(w => w.length > 2);
+    if (!words.length) return content;
+    const escaped = words.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const regex = new RegExp(`(${escaped.join('|')})`, 'gi');
+    const parts = content.split(regex);
+    return parts.map((part, i) =>
+      regex.test(part) ? <mark key={i} className="bg-yellow-200 rounded">{part}</mark> : <span key={i}>{part}</span>
+    );
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between p-4 border-b">
+          <div>
+            <div className="font-semibold text-sm">{state.passage?.filename || "Không rõ nguồn"}</div>
+            {state.passage?.pages && state.passage.pages.length > 0 && (
+              <div className="text-xs text-gray-500">
+                Trang: {state.passage.pages.join(", ")}
+              </div>
+            )}
+          </div>
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-600 text-lg leading-none"
+            aria-label="Đóng"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="p-4 overflow-y-auto text-sm leading-relaxed">
+          {state.passage
+            ? highlightContent(state.passage.content, state.query)
+            : <span className="text-gray-500">Không có nội dung chi tiết cho nguồn này.</span>
+          }
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const renderPreviewAttachment = (file: File) => {
   if (file.type.startsWith("image/")) {
     return (
@@ -1065,8 +1189,16 @@ function AIChatComponent(props: any) {
     sendMessage
   } = useAIChat(props.userId);
 
-  const mergedMessages = [...historyMessages, ...props.messages];
-  console.log(mergedMessages)
+  const mergedMessages = useMemo(() => {
+    // Dedup theo content+role để tránh duplicate khi local state và history cùng tồn tại
+    const seen = new Set<string>();
+    return [...historyMessages, ...props.messages].filter((m: any) => {
+      const key = `${m.role}::${m.content}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [historyMessages, props.messages]);
 
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<File[]>([]);
@@ -1080,6 +1212,8 @@ function AIChatComponent(props: any) {
   const messagesRef = useRef<HTMLDivElement>(null);
 
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [citationModal, setCitationModal] = useState<CitationModalState>({ open: false, passage: null, query: "" });
+  const [lastQuery, setLastQuery] = useState("");
 
   const { data: compareHistory, isLoading: isCompareHistoryLoading } = useQuery({
     queryKey: ["compare_history", props.userId || "anonymous"],
@@ -1181,6 +1315,7 @@ function AIChatComponent(props: any) {
 
   const handleSendMessage = () => {
     if (!input.trim()) return;
+    setLastQuery(input);
 
     sendMessage(input, (msg: any) => {
       props.setMessages((prev: any) => {
@@ -1500,15 +1635,84 @@ function AIChatComponent(props: any) {
               <div className="grid grid-cols-2 gap-2">
                 <div className="border rounded p-2">
                   <div className="font-semibold">PaCRAG</div>
-                  <div>Time: {activeRun.pac_query?.time_total_s ?? "-"}s</div>
-                  <div>Tokens: {activeRun.pac_query?.answer_tokens ?? "-"}</div>
+                  {isComparingQuery ? <Spin size="small" /> : (
+                    <>
+                      <div className="flex items-center">Time: {activeRun.pac_query?.time_total_s ?? "-"}s<QualityBadge show={isBetter("time_total_s", "pac", activeRun.pac_query, activeRun.graphrag_query)} /></div>
+                      <div>Tokens: {activeRun.pac_query?.answer_tokens ?? "-"}</div>
+                      <div className="flex items-center">Words: {activeRun.pac_query?.word_count ?? "N/A"}<QualityBadge show={isBetter("word_count", "pac", activeRun.pac_query, activeRun.graphrag_query)} /></div>
+                      <div className="flex items-center">Relevance: {activeRun.pac_query?.relevance_score != null ? activeRun.pac_query.relevance_score.toFixed(4) : "N/A"}<QualityBadge show={isBetter("relevance_score", "pac", activeRun.pac_query, activeRun.graphrag_query)} /></div>
+                      <div className="flex items-center">Coverage: {activeRun.pac_query?.source_coverage != null ? `${(activeRun.pac_query.source_coverage * 100).toFixed(2)}%` : "N/A"}<QualityBadge show={isBetter("source_coverage", "pac", activeRun.pac_query, activeRun.graphrag_query)} /></div>
+                    </>
+                  )}
                 </div>
                 <div className="border rounded p-2">
                   <div className="font-semibold">GraphRAG</div>
-                  <div>Time: {activeRun.graphrag_query?.time_total_s ?? "-"}s</div>
-                  <div>Tokens: {activeRun.graphrag_query?.answer_tokens ?? "-"}</div>
+                  {isComparingQuery ? <Spin size="small" /> : (
+                    <>
+                      <div className="flex items-center">Time: {activeRun.graphrag_query?.time_total_s ?? "-"}s<QualityBadge show={isBetter("time_total_s", "graph", activeRun.pac_query, activeRun.graphrag_query)} /></div>
+                      <div>Tokens: {activeRun.graphrag_query?.answer_tokens ?? "-"}</div>
+                      <div className="flex items-center">Words: {activeRun.graphrag_query?.word_count ?? "N/A"}<QualityBadge show={isBetter("word_count", "graph", activeRun.pac_query, activeRun.graphrag_query)} /></div>
+                      <div className="flex items-center">Relevance: {activeRun.graphrag_query?.relevance_score != null ? activeRun.graphrag_query.relevance_score.toFixed(4) : "N/A"}<QualityBadge show={isBetter("relevance_score", "graph", activeRun.pac_query, activeRun.graphrag_query)} /></div>
+                      <div className="flex items-center">Coverage: {activeRun.graphrag_query?.source_coverage != null ? `${(activeRun.graphrag_query.source_coverage * 100).toFixed(2)}%` : "N/A"}<QualityBadge show={isBetter("source_coverage", "graph", activeRun.pac_query, activeRun.graphrag_query)} /></div>
+                    </>
+                  )}
                 </div>
               </div>
+              {(activeRun.pac_query?.answer || activeRun.graphrag_query?.answer) && (
+                <div>
+                  <div className="font-semibold mt-2">Câu trả lời</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="border rounded p-2">
+                      <div className="font-semibold text-[10px] mb-1">PaCRAG</div>
+                      {isComparingQuery ? <Spin size="small" /> : (
+                        <div className="text-[10px] whitespace-pre-wrap max-h-32 overflow-y-auto">
+                          {activeRun.pac_query?.answer || "Không có câu trả lời"}
+                        </div>
+                      )}
+                    </div>
+                    <div className="border rounded p-2">
+                      <div className="font-semibold text-[10px] mb-1">GraphRAG</div>
+                      {isComparingQuery ? <Spin size="small" /> : (
+                        <div className="text-[10px] whitespace-pre-wrap max-h-32 overflow-y-auto">
+                          {activeRun.graphrag_query?.answer || "Không có câu trả lời"}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {(activeRun.pac_query?.retrieved_chunks && activeRun.pac_query.retrieved_chunks.length > 0) && (
+                <div>
+                  <div className="font-semibold mt-2 text-[11px]">Nguồn PaCRAG</div>
+                  <div className="space-y-0.5">
+                    {activeRun.pac_query.retrieved_chunks.map((chunk: RetrievedPassage, i: number) => (
+                      <button
+                        key={i}
+                        className="text-left text-blue-600 underline text-[10px] block truncate hover:text-blue-800 w-full"
+                        onClick={() => setCitationModal({ open: true, passage: chunk, query: lastQuery })}
+                      >
+                        {chunk.filename}{chunk.pages?.length ? ` (tr. ${chunk.pages.join(",")})` : ""}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {(activeRun.graphrag_query?.doc_passages && activeRun.graphrag_query.doc_passages.length > 0) && (
+                <div>
+                  <div className="font-semibold mt-2 text-[11px]">Nguồn GraphRAG</div>
+                  <div className="space-y-0.5">
+                    {activeRun.graphrag_query.doc_passages.map((passage: RetrievedPassage, i: number) => (
+                      <button
+                        key={i}
+                        className="text-left text-blue-600 underline text-[10px] block truncate hover:text-blue-800 w-full"
+                        onClick={() => setCitationModal({ open: true, passage, query: lastQuery })}
+                      >
+                        {passage.filename}{passage.pages?.length ? ` (tr. ${passage.pages.join(",")})` : ""}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               {isComparingQuery && (
                 <div className="text-xs text-blue-500">Đang so sánh query...</div>
               )}
@@ -1516,6 +1720,7 @@ function AIChatComponent(props: any) {
           )}
         </div>
       </div>
+      <CitationModal state={citationModal} onClose={() => setCitationModal({ open: false, passage: null, query: "" })} />
     </div>
   );
 }
@@ -1862,7 +2067,7 @@ export function AIChatWorkspace() {
     sendMessage
   } = useAIChat(userId);
 
-  const { messages: graphHistoryMessages } = useGraphRAGHistory(userId);
+  const { messages: graphHistoryMessages, refetch: refetchGraphHistory } = useGraphRAGHistory(userId);
 
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<Array<{ file: File; enabled: boolean; error?: string }>>([]);
@@ -1923,15 +2128,25 @@ export function AIChatWorkspace() {
   // Không clear local messages - luôn giữ nội dung, dedup theo id khi merge với history
 
   const mergedGraphMessages = useMemo(() => {
-    const historyIds = new Set(graphHistoryMessages.map((m: any) => m.id));
-    const localOnly = graphMessages.filter((m: any) => !historyIds.has(m.id));
-    return [...graphHistoryMessages, ...localOnly];
+    // Dedup: history từ server là source of truth
+    // Local messages chỉ hiển thị trong lúc chờ save xong
+    const seen = new Set<string>();
+    return [...graphHistoryMessages, ...graphMessages].filter((m: any) => {
+      const key = `${m.role}::${m.content}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }, [graphHistoryMessages, graphMessages]);
 
   const mergedRagMessages = useMemo(() => {
-    const historyIds = new Set(historyMessages.map((m: any) => m.id));
-    const localOnly = ragMessages.filter((m: any) => !historyIds.has(m.id));
-    return [...historyMessages, ...localOnly];
+    const seen = new Set<string>();
+    return [...historyMessages, ...ragMessages].filter((m: any) => {
+      const key = `${m.role}::${m.content}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }, [historyMessages, ragMessages]);
 
   const messagesRef = useRef<HTMLDivElement>(null);
@@ -1966,6 +2181,9 @@ export function AIChatWorkspace() {
   }, []);
 
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [lastQuery, setLastQuery] = useState("");
+  const [citationModal, setCitationModal] = useState<CitationModalState>({ open: false, passage: null, query: "" });
+  const [compareTab, setCompareTab] = useState<'metrics' | 'answers' | 'sources'>('metrics');
 
   const { data: compareHistory, isLoading: isCompareHistoryLoading } = useQuery({
     queryKey: ["compare_history", userId || "anonymous"],
@@ -2139,30 +2357,23 @@ export function AIChatWorkspace() {
     setGraphMessages((prev) => [...prev, userMsg]);
     setRagMessages((prev: any) => [...prev, userMsg]);
 
-    sendMessage(input, (msg: any) => {
-      if (msg.role === "user") return;
-      setRagMessages((prev: any) => {
-        const exist = prev.find((m: any) => m.id === msg.id);
-        if (exist) {
-          return prev.map((m: any) => (m.id === msg.id ? msg : m));
-        }
-        return [...prev, msg];
-      });
-    });
+    const currentInput = input;
+    setLastQuery(input);
+    setInput("");
+
+    let graphAnswer = "";
 
     const appendGraphAnswer = (answer: string, sources?: Array<string | { filename?: string; pages?: Array<number | string> }>) => {
       const sourceLines = sources && sources.length > 0
         ? "\n\n" + sources.flatMap((source) => {
-            if (typeof source === "string") {
-              return [`- Nguồn: ${source}`];
-            }
-
+            if (typeof source === "string") return [`- Nguồn: ${source}`];
             const filename = source?.filename || "Không rõ";
             const pages = Array.isArray(source?.pages) ? source.pages : [];
             const pageText = pages.length > 0 ? pages.join(", ") : "không xác định";
             return [`- Nguồn: ${filename}`, `- Trang: ${pageText}`];
           }).join("\n")
         : "";
+      graphAnswer = answer;
       setGraphMessages((prev) => [
         ...prev,
         {
@@ -2175,37 +2386,70 @@ export function AIChatWorkspace() {
       ]);
     };
 
-    void (async () => {
+    // Chạy PaCRAG stream và GraphRAG song song
+    // sendMessage trả về Promise<string> với full answer khi stream xong
+    const ragPromise = sendMessage(currentInput, (msg: any) => {
+      if (msg.role === "user") return;
+      setRagMessages((prev: any) => {
+        const exist = prev.find((m: any) => m.id === msg.id);
+        if (exist) return prev.map((m: any) => (m.id === msg.id ? msg : m));
+        return [...prev, msg];
+      });
+    });
+
+    const graphPromise = (async (): Promise<string> => {
       setIsGraphThinking(true);
       try {
         const selectedSource = uploadedFiles.find((f) => f.selected)?.name || null;
         if (activeRunId) {
-          const result = await compareQuery({ runId: activeRunId, query: input });
+          const result = await compareQuery({ runId: activeRunId, query: currentInput });
           const run = result?.data?.run;
-          const graphAnswer = run?.graphrag_query?.answer || "";
-          if (graphAnswer) {
-            appendGraphAnswer(graphAnswer, run?.graphrag_query?.sources);
-            setIsGraphThinking(false);
-            queryClient.invalidateQueries({ queryKey: ["graph_chat_history", userId] });
-            return;
+          const ans = run?.graphrag_query?.answer || "";
+          if (ans) {
+            appendGraphAnswer(ans, run?.graphrag_query?.sources);
+            return ans;
           }
         }
-
-        const fallback = await chatService.graphQuery(input, userId || "anonymous", selectedSource);
-        const answer = fallback?.data?.answer || "";
-        if (answer) {
-          appendGraphAnswer(answer, fallback?.data?.sources);
-        } else {
-          appendGraphAnswer("GraphRAG chưa có câu trả lời phù hợp.");
-        }
-      } catch (err) {
+        const fallback = await chatService.graphQuery(currentInput, userId || "anonymous", selectedSource);
+        const ans = fallback?.data?.answer || "";
+        appendGraphAnswer(ans || "GraphRAG chưa có câu trả lời phù hợp.", fallback?.data?.sources);
+        return ans;
+      } catch {
         appendGraphAnswer("GraphRAG không trả lời được.");
+        return "";
+      } finally {
+        setIsGraphThinking(false);
       }
-      setIsGraphThinking(false);
-      queryClient.invalidateQueries({ queryKey: ["graph_chat_history", userId] });
     })();
 
-    setInput("");
+    // Đợi cả 2 xong → save 1 lần duy nhất vào history
+    const [ragFinalAnswer, graphFinalAnswer] = await Promise.all([ragPromise, graphPromise]);
+
+    try {
+      await fetch(`${PUBLIC_API_BASE_URL}/langchain/save_turn`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: userId || "anonymous",
+          user_content: currentInput,
+          rag_content: ragFinalAnswer || null,
+          graphrag_content: graphFinalAnswer || null,
+        }),
+      });
+
+      // Fetch lại history từ server, sau đó clear local state
+      // Thứ tự quan trọng: fetch trước → data đã có → clear local → không flash trắng
+      await Promise.all([
+        queryClient.refetchQueries({ queryKey: ["ai_chat_history", userId] }),
+        queryClient.refetchQueries({ queryKey: ["graph_chat_history", userId] }),
+      ]);
+
+      // Sau khi history đã load xong, clear local state để tránh duplicate
+      setRagMessages([]);
+      setGraphMessages([]);
+    } catch {
+      // Lỗi save: giữ local state, không clear
+    }
   };
 
   if (isLoading && mergedRagMessages.length === 0) {
@@ -2217,6 +2461,7 @@ export function AIChatWorkspace() {
   }
 
   return (
+    <>
     <div className="min-h-screen flex flex-col smartchatbot-shell">
       <UserHeader />
       <div className="flex-1 flex flex-col" style={{ minHeight: 0 }}>
@@ -2760,48 +3005,198 @@ export function AIChatWorkspace() {
 
               {/* Chi tiết run đang chọn */}
               {activeRun && (
-                <div className="border border-gray-200 rounded-xl p-4 bg-white space-y-4">
-                  <div className="font-semibold text-sm">
-                    Chi tiết: <span className="text-blue-600">{activeRun.file_name}</span>
+                <div className="border border-gray-200 rounded-xl bg-white overflow-hidden">
+                  {/* Header */}
+                  <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+                    <div className="font-semibold text-sm truncate text-gray-700" title={activeRun.file_name}>
+                      📄 {activeRun.file_name}
+                    </div>
+                    {isComparingQuery && <Spin size="small" />}
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
+
+                  {/* Ingest summary – compact 2-col */}
+                  <div className="grid grid-cols-2 gap-2 px-4 py-2 bg-gray-50 text-xs border-b border-gray-100">
                     <div>
-                      <div className="font-semibold text-xs text-gray-500 uppercase mb-2">Kết quả Ingest</div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <div className="border rounded-lg p-3 bg-blue-50">
-                          <div className="font-semibold text-blue-700 mb-1">PaCRAG</div>
-                          <div>Time: {activeRun.pac_ingest?.time_total_s ?? "-"}s</div>
-                          <div>Parent: {activeRun.pac_ingest?.parent_chunks ?? "-"}</div>
-                          <div>Child: {activeRun.pac_ingest?.child_chunks ?? "-"}</div>
-                        </div>
-                        <div className="border rounded-lg p-3 bg-purple-50">
-                          <div className="font-semibold text-purple-700 mb-1">GraphRAG</div>
-                          <div>Time: {activeRun.graphrag_ingest?.time_total_s ?? "-"}s</div>
-                          <div>Chunks: {activeRun.graphrag_ingest?.chunks ?? "-"}</div>
-                          <div>Sections: {activeRun.graphrag_ingest?.sections ?? "-"}</div>
-                          <div>Entities: {activeRun.graphrag_ingest?.entities ?? "-"}</div>
-                          <div>Relations: {activeRun.graphrag_ingest?.relations ?? "-"}</div>
-                        </div>
-                      </div>
+                      <span className="font-medium text-blue-600">PaC</span>
+                      <span className="ml-1 text-gray-500">{activeRun.pac_ingest?.time_total_s ?? "-"}s · {activeRun.pac_ingest?.child_chunks ?? "-"} chunks</span>
                     </div>
                     <div>
-                      <div className="font-semibold text-xs text-gray-500 uppercase mb-2">Kết quả Query</div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <div className="border rounded-lg p-3 bg-blue-50">
-                          <div className="font-semibold text-blue-700 mb-1">PaCRAG</div>
-                          <div>Time: {activeRun.pac_query?.time_total_s ?? "-"}s</div>
-                          <div>Tokens: {activeRun.pac_query?.answer_tokens ?? "-"}</div>
+                      <span className="font-medium text-purple-600">Graph</span>
+                      <span className="ml-1 text-gray-500">{activeRun.graphrag_ingest?.time_total_s ?? "-"}s · {activeRun.graphrag_ingest?.chunks ?? "-"} chunks</span>
+                    </div>
+                  </div>
+
+                  {/* Tabs */}
+                  <div className="flex border-b border-gray-100 text-xs">
+                    {(['metrics', 'answers', 'sources'] as const).map((tab) => (
+                      <button
+                        key={tab}
+                        onClick={() => setCompareTab(tab)}
+                        className={`flex-1 py-2 font-medium transition-colors ${
+                          compareTab === tab
+                            ? 'text-blue-600 border-b-2 border-blue-500 bg-white'
+                            : 'text-gray-500 hover:text-gray-700 bg-gray-50'
+                        }`}
+                      >
+                        {tab === 'metrics' ? '📊 Metrics' : tab === 'answers' ? '💬 Trả lời' : '📎 Nguồn'}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Tab content */}
+                  <div className="p-3">
+                    {/* METRICS TAB */}
+                    {compareTab === 'metrics' && (
+                      <div className="grid grid-cols-2 gap-3 text-xs">
+                        {/* PaCRAG */}
+                        <div className="space-y-1">
+                          <div className="font-semibold text-blue-600 mb-1">PaCRAG</div>
+                          {isComparingQuery ? <Spin size="small" /> : (
+                            <>
+                              <div className="flex items-center justify-between">
+                                <span className="text-gray-500">Time</span>
+                                <span className="flex items-center gap-1">{activeRun.pac_query?.time_total_s ?? "-"}s <QualityBadge show={isBetter("time_total_s", "pac", activeRun.pac_query, activeRun.graphrag_query)} /></span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-gray-500">Tokens</span>
+                                <span>{activeRun.pac_query?.answer_tokens ?? "-"}</span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-gray-500">Words</span>
+                                <span className="flex items-center gap-1">{activeRun.pac_query?.word_count ?? "N/A"} <QualityBadge show={isBetter("word_count", "pac", activeRun.pac_query, activeRun.graphrag_query)} /></span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-gray-500">Relevance</span>
+                                <span className="flex items-center gap-1">{activeRun.pac_query?.relevance_score != null ? activeRun.pac_query.relevance_score.toFixed(4) : "N/A"} <QualityBadge show={isBetter("relevance_score", "pac", activeRun.pac_query, activeRun.graphrag_query)} /></span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-gray-500">Coverage</span>
+                                <span className="flex items-center gap-1">{activeRun.pac_query?.source_coverage != null ? `${(activeRun.pac_query.source_coverage * 100).toFixed(1)}%` : "N/A"} <QualityBadge show={isBetter("source_coverage", "pac", activeRun.pac_query, activeRun.graphrag_query)} /></span>
+                              </div>
+                            </>
+                          )}
                         </div>
-                        <div className="border rounded-lg p-3 bg-purple-50">
-                          <div className="font-semibold text-purple-700 mb-1">GraphRAG</div>
-                          <div>Time: {activeRun.graphrag_query?.time_total_s ?? "-"}s</div>
-                          <div>Tokens: {activeRun.graphrag_query?.answer_tokens ?? "-"}</div>
+                        {/* GraphRAG */}
+                        <div className="space-y-1">
+                          <div className="font-semibold text-purple-600 mb-1">GraphRAG</div>
+                          {isComparingQuery ? <Spin size="small" /> : (
+                            <>
+                              <div className="flex items-center justify-between">
+                                <span className="text-gray-500">Time</span>
+                                <span className="flex items-center gap-1">{activeRun.graphrag_query?.time_total_s ?? "-"}s <QualityBadge show={isBetter("time_total_s", "graph", activeRun.pac_query, activeRun.graphrag_query)} /></span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-gray-500">Tokens</span>
+                                <span>{activeRun.graphrag_query?.answer_tokens ?? "-"}</span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-gray-500">Words</span>
+                                <span className="flex items-center gap-1">{activeRun.graphrag_query?.word_count ?? "N/A"} <QualityBadge show={isBetter("word_count", "graph", activeRun.pac_query, activeRun.graphrag_query)} /></span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-gray-500">Relevance</span>
+                                <span className="flex items-center gap-1">{activeRun.graphrag_query?.relevance_score != null ? activeRun.graphrag_query.relevance_score.toFixed(4) : "N/A"} <QualityBadge show={isBetter("relevance_score", "graph", activeRun.pac_query, activeRun.graphrag_query)} /></span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-gray-500">Coverage</span>
+                                <span className="flex items-center gap-1">{activeRun.graphrag_query?.source_coverage != null ? `${(activeRun.graphrag_query.source_coverage * 100).toFixed(1)}%` : "N/A"} <QualityBadge show={isBetter("source_coverage", "graph", activeRun.pac_query, activeRun.graphrag_query)} /></span>
+                              </div>
+                            </>
+                          )}
                         </div>
                       </div>
-                      {isComparingQuery && (
-                        <div className="mt-2 text-blue-500">Đang so sánh query...</div>
-                      )}
-                    </div>
+                    )}
+
+                    {/* ANSWERS TAB */}
+                    {compareTab === 'answers' && (
+                      <div className="grid grid-cols-2 gap-3 text-xs">
+                        <div>
+                          <div className="font-semibold text-blue-600 mb-1">PaCRAG</div>
+                          {isComparingQuery ? <Spin size="small" /> : (
+                            <div className="whitespace-pre-wrap max-h-60 overflow-y-auto text-gray-700 leading-relaxed">
+                              {activeRun.pac_query?.answer || <span className="text-gray-400 italic">Chưa có câu trả lời</span>}
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <div className="font-semibold text-purple-600 mb-1">GraphRAG</div>
+                          {isComparingQuery ? <Spin size="small" /> : (
+                            <div className="whitespace-pre-wrap max-h-60 overflow-y-auto text-gray-700 leading-relaxed">
+                              {activeRun.graphrag_query?.answer || <span className="text-gray-400 italic">Chưa có câu trả lời</span>}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* SOURCES TAB */}
+                    {compareTab === 'sources' && (
+                      <div className="grid grid-cols-2 gap-3 text-xs">
+                        {/* PaCRAG sources – group by filename */}
+                        <div>
+                          <div className="font-semibold text-blue-600 mb-1">PaCRAG</div>
+                          {!activeRun.pac_query?.retrieved_chunks?.length
+                            ? <span className="text-gray-400 italic">Chưa có nguồn</span>
+                            : (() => {
+                                // Group chunks by filename
+                                const grouped = new Map<string, RetrievedPassage[]>();
+                                (activeRun.pac_query.retrieved_chunks as RetrievedPassage[]).forEach((chunk) => {
+                                  const key = chunk.filename || "Không rõ";
+                                  if (!grouped.has(key)) grouped.set(key, []);
+                                  grouped.get(key)!.push(chunk);
+                                });
+                                return Array.from(grouped.entries()).map(([filename, chunks]) => (
+                                  <div key={filename} className="mb-2">
+                                    <div className="font-medium text-gray-600 truncate" title={filename}>{filename}</div>
+                                    <div className="pl-2 space-y-0.5">
+                                      {chunks.map((chunk, i) => (
+                                        <button
+                                          key={i}
+                                          className="text-left text-blue-500 hover:text-blue-700 block text-[10px]"
+                                          onClick={() => setCitationModal({ open: true, passage: chunk, query: lastQuery })}
+                                        >
+                                          tr. {chunk.pages?.length ? chunk.pages.join(",") : "?"}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ));
+                              })()
+                          }
+                        </div>
+                        {/* GraphRAG sources */}
+                        <div>
+                          <div className="font-semibold text-purple-600 mb-1">GraphRAG</div>
+                          {!activeRun.graphrag_query?.doc_passages?.length
+                            ? <span className="text-gray-400 italic">Chưa có nguồn</span>
+                            : (() => {
+                                const grouped = new Map<string, RetrievedPassage[]>();
+                                (activeRun.graphrag_query.doc_passages as RetrievedPassage[]).forEach((p) => {
+                                  const key = p.filename || "Không rõ";
+                                  if (!grouped.has(key)) grouped.set(key, []);
+                                  grouped.get(key)!.push(p);
+                                });
+                                return Array.from(grouped.entries()).map(([filename, passages]) => (
+                                  <div key={filename} className="mb-2">
+                                    <div className="font-medium text-gray-600 truncate" title={filename}>{filename}</div>
+                                    <div className="pl-2 space-y-0.5">
+                                      {passages.map((p, i) => (
+                                        <button
+                                          key={i}
+                                          className="text-left text-purple-500 hover:text-purple-700 block text-[10px]"
+                                          onClick={() => setCitationModal({ open: true, passage: p, query: lastQuery })}
+                                        >
+                                          tr. {p.pages?.length ? p.pages.join(",") : "?"}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ));
+                              })()
+                          }
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -2810,5 +3205,7 @@ export function AIChatWorkspace() {
         </div>
       </div>
     </div>
+    <CitationModal state={citationModal} onClose={() => setCitationModal({ open: false, passage: null, query: "" })} />
+    </>
   );
 }
