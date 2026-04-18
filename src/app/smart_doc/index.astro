@@ -1,0 +1,8 @@
+---
+import Rootlayout from "@/shared/layouts/Rootlayout.astro";
+import { AIChatWorkspace } from "./components/AIChatWorkspace";
+---
+
+<Rootlayout>
+    <AIChatWorkspace client:only="react" />
+</Rootlayout>

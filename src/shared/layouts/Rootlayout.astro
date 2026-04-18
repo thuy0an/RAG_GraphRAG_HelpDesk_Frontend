@@ -1,0 +1,17 @@
+---
+import '@/shared/styles/global.css';
+import { QueryProvider } from './QueryProvider';
+---
+
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <style></style>
+    <meta name="viewport" content="width=device-width" />
+  </head>
+  <body>    
+    <QueryProvider>
+      <slot/>
+    </QueryProvider>
+  </body>
+</html>
