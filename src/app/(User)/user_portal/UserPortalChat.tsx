@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useMemo } from "react";
+﻿import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { queryClient, useMutation, useQuery } from "@/lib/ReactQuery";
@@ -1020,6 +1020,22 @@ export async function uploadFiles(files: File[]) {
 }
 
 // ===== UI COMPONENTS =====
+// MetricRow helper component
+function MetricRow({ label, value, better, lowerIsBetter }: { label: string; value: string | null; better?: boolean; lowerIsBetter?: boolean }) {
+  return (
+    <div className="flex items-center justify-between py-0.5">
+      <span className="text-gray-500">{label}</span>
+      {value == null
+        ? <span className="text-gray-300">-</span>
+        : <span className={`flex items-center gap-1 font-medium ${better ? "text-green-600" : "text-gray-700"}`}>
+            {value}
+            {better && <span className="text-[9px] text-green-600 font-semibold">✓</span>}
+          </span>
+      }
+    </div>
+  );
+}
+
 // Quality Badge Component
 function QualityBadge({ show }: { show: boolean }) {
   if (!show) return null;
@@ -1228,6 +1244,7 @@ function AIChatComponent(props: any) {
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const [activeToolSections, setActiveToolSections] = useState<string[]>(["chunk"]);
+  const [showChunkConfig, setShowChunkConfig] = useState(false);
   const [chunkConfig, setChunkConfig] = useState({
     parent_chunk_size: 2048,
     parent_chunk_overlap: 400,
@@ -1271,7 +1288,11 @@ function AIChatComponent(props: any) {
   const { mutateAsync: compareQuery, isPending: isComparingQuery } = useMutation({
     mutationFn: (payload: { runId: string; query: string }) =>
       chatService.compareQuery(props.userId || "anonymous", payload.runId, payload.query),
-    onSuccess: () => {
+    onSuccess: (data) => {
+      const newRunId = data?.data?.run?.id;
+      if (newRunId) {
+        setActiveRunId(newRunId);
+      }
       queryClient.invalidateQueries({ queryKey: ["compare_history", props.userId] });
     }
   }, queryClient);
@@ -2218,12 +2239,14 @@ export function AIChatWorkspace() {
   }, queryClient);
 
   const compareRuns = compareHistory?.data?.runs || [];
+  // Chỉ hiển thị các run đã có câu hỏi (query_text) trong bảng so sánh
+  const queryRuns = compareRuns.filter((run: any) => !!run.query_text);
 
   useEffect(() => {
-    if (!activeRunId && compareRuns.length > 0) {
-      setActiveRunId(compareRuns[0].id);
+    if (!activeRunId && queryRuns.length > 0) {
+      setActiveRunId(queryRuns[0].id);
     }
-  }, [compareRuns, activeRunId]);
+  }, [queryRuns, activeRunId]);
 
   useEffect(() => {
     if (compareRuns.length === 0) return;
@@ -2267,7 +2290,11 @@ export function AIChatWorkspace() {
   const { mutateAsync: compareQuery, isPending: isComparingQuery } = useMutation({
     mutationFn: (payload: { runId: string; query: string; rerankingEnabled?: boolean; sourceFilter?: string | null; sourceFilters?: string[] | null }) =>
       chatService.compareQuery(userId || "anonymous", payload.runId, payload.query, payload.rerankingEnabled ?? false, payload.sourceFilter ?? null, payload.sourceFilters ?? null),
-    onSuccess: () => {
+    onSuccess: (data) => {
+      const newRunId = data?.data?.run?.id;
+      if (newRunId) {
+        setActiveRunId(newRunId);
+      }
       queryClient.invalidateQueries({ queryKey: ["compare_history", userId] });
     }
   }, queryClient);
@@ -2401,17 +2428,19 @@ export function AIChatWorkspace() {
             return [`- Nguồn: ${filename}`, `- Trang: ${pageText}`];
           }).join("\n")
         : "";
-      graphAnswer = answer;
+      const fullAnswer = `${answer}${sourceLines}`;
+      graphAnswer = fullAnswer;
       setGraphMessages((prev) => [
         ...prev,
         {
           id: crypto.randomUUID(),
-          content: `${answer}${sourceLines}`,
+          content: fullAnswer,
           sender_id: "graph-rag",
           role: "ai",
           created_at: new Date().toISOString(),
         },
       ]);
+      return fullAnswer;
     };
 
     // Chạy PaCRAG stream và GraphRAG song song
@@ -2440,17 +2469,17 @@ export function AIChatWorkspace() {
           const run = result?.data?.run;
           const ans = run?.graphrag_query?.answer || "";
           if (ans) {
-            appendGraphAnswer(ans, run?.graphrag_query?.sources);
-            return ans;
+            const fullAnswer = appendGraphAnswer(ans, run?.graphrag_query?.sources);
+            return fullAnswer;
           }
         }
         const fallback = await chatService.graphQuery(currentInput, userId || "anonymous", activeSourceFilter);
         const ans = fallback?.data?.answer || "";
-        appendGraphAnswer(ans || "GraphRAG chưa có câu trả lời phù hợp.", fallback?.data?.sources);
-        return ans;
+        const fullAnswer = appendGraphAnswer(ans || "GraphRAG chưa có câu trả lời phù hợp.", fallback?.data?.sources);
+        return fullAnswer;
       } catch {
-        appendGraphAnswer("GraphRAG không trả lời được.");
-        return "";
+        const fullAnswer = appendGraphAnswer("GraphRAG không trả lời được.");
+        return fullAnswer;
       } finally {
         setIsGraphThinking(false);
       }
@@ -3038,58 +3067,112 @@ export function AIChatWorkspace() {
               <Spin size="small" />
               <span>Đang tải dữ liệu so sánh...</span>
             </div>
-          ) : compareRuns.length === 0 ? (
+          ) : queryRuns.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-8 text-gray-400 gap-2">
               <div className="text-2xl">📊</div>
               <div className="font-medium">Chưa có dữ liệu so sánh</div>
-              <div className="text-[11px] text-center">Upload file PDF/DOCX và gửi câu hỏi để xem kết quả so sánh PaCRAG vs GraphRAG tại đây</div>
+              <div className="text-[11px] text-center">Gửi câu hỏi để xem kết quả so sánh PaCRAG vs GraphRAG tại đây</div>
             </div>
           ) : (
             <div className="space-y-4">
-              {/* Danh sách runs – hiển thị theo câu hỏi */}
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-                {compareRuns.map((run: any) => (
-                  <div
-                    key={run.id}
-                    className={`border rounded-xl p-3 cursor-pointer transition hover:shadow-sm ${activeRunId === run.id ? "border-blue-500 bg-blue-50" : "border-gray-200 bg-white"}`}
-                    onClick={() => setActiveRunId(run.id)}
-                  >
-                    {/* Câu hỏi (nếu có) hoặc tên file */}
-                    <div
-                      className="font-semibold text-xs line-clamp-2 leading-tight"
-                      title={run.query_text || run.file_name}
-                    >
-                      {run.query_text
-                        ? <><span className="text-blue-500 mr-1">Q:</span>{run.query_text}</>
-                        : <><span className="text-gray-400 mr-1">📄</span>{run.file_name}</>
-                      }
-                    </div>
-                    <div className="text-[10px] text-gray-400 mt-0.5 truncate">{run.file_name}</div>
-                    <div className="text-[10px] text-gray-400">{run.created_at || ""}</div>
-                    <div className="mt-2 flex justify-between text-[11px]">
-                      <span className="text-blue-600">PaC {run.pac_query?.time_total_s ?? run.pac_ingest?.time_total_s ?? "-"}s</span>
-                      <span className="text-purple-600">Graph {run.graphrag_query?.time_total_s ?? run.graphrag_ingest?.time_total_s ?? "-"}s</span>
-                    </div>
-                    <Button
-                      size="small"
-                      danger
-                      className="mt-2 w-full"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDeleteCompareRun(run.id);
-                      }}
-                    >
-                      Xóa
-                    </Button>
-                  </div>
-                ))}
+              {/* Danh sách runs – dạng bảng ngang, hiển thị đầy đủ metrics ngay */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-gray-50 text-gray-500 text-[11px] uppercase tracking-wide">
+                      <th className="text-left px-3 py-2 font-medium border-b border-gray-200 w-[30%]">Câu hỏi</th>
+                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-blue-600">PaC Time</th>
+                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-blue-600">PaC Relevance</th>
+                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-blue-600">PaC Confidence</th>
+                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-purple-600">Graph Time</th>
+                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-purple-600">Graph Relevance</th>
+                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-purple-600">Graph Confidence</th>
+                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-gray-400">Thắng</th>
+                      <th className="px-2 py-2 border-b border-gray-200"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {queryRuns.map((run: any) => {
+                      const hasQuery = !!(run.pac_query || run.graphrag_query);
+                      const pacWins = hasQuery && (
+                        (isBetter("relevance_score", "pac", run.pac_query, run.graphrag_query) ? 1 : 0) +
+                        (isBetter("time_total_s", "pac", run.pac_query, run.graphrag_query) ? 1 : 0) +
+                        (isBetter("source_coverage", "pac", run.pac_query, run.graphrag_query) ? 1 : 0)
+                      );
+                      const graphWins = hasQuery && (
+                        (isBetter("relevance_score", "graph", run.pac_query, run.graphrag_query) ? 1 : 0) +
+                        (isBetter("time_total_s", "graph", run.pac_query, run.graphrag_query) ? 1 : 0) +
+                        (isBetter("source_coverage", "graph", run.pac_query, run.graphrag_query) ? 1 : 0)
+                      );
+                      const winner = !hasQuery ? null : pacWins > graphWins ? "pac" : graphWins > pacWins ? "graph" : "tie";
+                      return (
+                        <tr
+                          key={run.id}
+                          className={`border-b border-gray-100 cursor-pointer transition-colors ${activeRunId === run.id ? "bg-blue-50" : "hover:bg-gray-50"}`}
+                          onClick={() => setActiveRunId(run.id)}
+                        >
+                          <td className="px-3 py-2">
+                            <div className="font-medium line-clamp-2 leading-tight text-gray-700" title={run.query_text}>
+                              <span className="text-blue-400 mr-1">Q:</span>{run.query_text}
+                            </div>
+                            <div className="text-[10px] text-gray-400 truncate mt-0.5">{run.file_name}</div>
+                            <div className="text-[10px] text-gray-300">{run.created_at || ""}</div>
+                          </td>
+                          {/* PaC metrics */}
+                          <td className="text-center px-2 py-2">
+                            {run.pac_query?.time_total_s != null
+                              ? <span className={`font-medium ${isBetter("time_total_s", "pac", run.pac_query, run.graphrag_query) ? "text-green-600" : "text-gray-600"}`}>{run.pac_query.time_total_s}s</span>
+                              : <span className="text-gray-300">-</span>}
+                          </td>
+                          <td className="text-center px-2 py-2">
+                            {run.pac_query?.relevance_score != null
+                              ? <span className={`font-medium ${isBetter("relevance_score", "pac", run.pac_query, run.graphrag_query) ? "text-green-600" : "text-gray-600"}`}>{run.pac_query.relevance_score.toFixed(3)}</span>
+                              : <span className="text-gray-300">-</span>}
+                          </td>
+                          <td className="text-center px-2 py-2">
+                            <ConfidenceBadge score={run.pac_query?.confidence_score} />
+                          </td>
+                          {/* Graph metrics */}
+                          <td className="text-center px-2 py-2">
+                            {run.graphrag_query?.time_total_s != null
+                              ? <span className={`font-medium ${isBetter("time_total_s", "graph", run.pac_query, run.graphrag_query) ? "text-green-600" : "text-gray-600"}`}>{run.graphrag_query.time_total_s}s</span>
+                              : <span className="text-gray-300">-</span>}
+                          </td>
+                          <td className="text-center px-2 py-2">
+                            {run.graphrag_query?.relevance_score != null
+                              ? <span className={`font-medium ${isBetter("relevance_score", "graph", run.pac_query, run.graphrag_query) ? "text-green-600" : "text-gray-600"}`}>{run.graphrag_query.relevance_score.toFixed(3)}</span>
+                              : <span className="text-gray-300">-</span>}
+                          </td>
+                          <td className="text-center px-2 py-2">
+                            <ConfidenceBadge score={run.graphrag_query?.confidence_score} />
+                          </td>
+                          {/* Winner */}
+                          <td className="text-center px-2 py-2">
+                            {winner === "pac" && <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-100 text-blue-700">PaC</span>}
+                            {winner === "graph" && <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-purple-100 text-purple-700">Graph</span>}
+                            {winner === "tie" && <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-100 text-gray-500">Tie</span>}
+                            {!winner && <span className="text-gray-300 text-[10px]">Chưa có</span>}
+                          </td>
+                          <td className="px-2 py-2">
+                            <button
+                              className="text-red-400 hover:text-red-600 text-[10px] whitespace-nowrap"
+                              onClick={(e) => { e.stopPropagation(); handleDeleteCompareRun(run.id); }}
+                            >
+                              Xóa
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
 
               {/* Chi tiết run đang chọn */}
               {activeRun && (
                 <div className="border border-gray-200 rounded-xl bg-white overflow-hidden">
                   {/* Header */}
-                  <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+                  <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between bg-gray-50">
                     <div className="flex-1 min-w-0">
                       {activeRun.query_text ? (
                         <div className="font-semibold text-sm text-gray-700 line-clamp-2" title={activeRun.query_text}>
@@ -3100,20 +3183,37 @@ export function AIChatWorkspace() {
                           📄 {activeRun.file_name}
                         </div>
                       )}
-                      <div className="text-[10px] text-gray-400 mt-0.5 truncate">📄 {activeRun.file_name}</div>
+                      <div className="text-[10px] text-gray-400 mt-0.5 truncate">📄 {activeRun.file_name} · {activeRun.created_at || ""}</div>
                     </div>
-                    {isComparingQuery && <Spin size="small" />}
+                    {isComparingQuery && (
+                      <div className="flex items-center gap-1.5 text-[11px] text-blue-500 ml-3">
+                        <Spin size="small" />
+                        <span>Đang tính...</span>
+                      </div>
+                    )}
                   </div>
 
-                  {/* Ingest summary – compact 2-col */}
-                  <div className="grid grid-cols-2 gap-2 px-4 py-2 bg-gray-50 text-xs border-b border-gray-100">
-                    <div>
-                      <span className="font-medium text-blue-600">PaC</span>
-                      <span className="ml-1 text-gray-500">{activeRun.pac_ingest?.time_total_s ?? "-"}s · {activeRun.pac_ingest?.child_chunks ?? "-"} chunks</span>
+                  {/* Ingest summary – 4-col compact */}
+                  <div className="grid grid-cols-4 gap-0 text-xs border-b border-gray-100 divide-x divide-gray-100">
+                    <div className="px-3 py-2">
+                      <div className="text-[10px] text-gray-400 mb-0.5">PaC Ingest</div>
+                      <div className="font-medium text-blue-600">{activeRun.pac_ingest?.time_total_s ?? "-"}s</div>
+                      <div className="text-gray-400">{activeRun.pac_ingest?.child_chunks ?? "-"} child chunks</div>
                     </div>
-                    <div>
-                      <span className="font-medium text-purple-600">Graph</span>
-                      <span className="ml-1 text-gray-500">{activeRun.graphrag_ingest?.time_total_s ?? "-"}s · {activeRun.graphrag_ingest?.chunks ?? "-"} chunks</span>
+                    <div className="px-3 py-2">
+                      <div className="text-[10px] text-gray-400 mb-0.5">Graph Ingest</div>
+                      <div className="font-medium text-purple-600">{activeRun.graphrag_ingest?.time_total_s ?? "-"}s</div>
+                      <div className="text-gray-400">{activeRun.graphrag_ingest?.chunks ?? "-"} chunks · {activeRun.graphrag_ingest?.entities ?? "-"} entities</div>
+                    </div>
+                    <div className="px-3 py-2">
+                      <div className="text-[10px] text-gray-400 mb-0.5">PaC Chunks</div>
+                      <div className="font-medium text-blue-600">{activeRun.pac_ingest?.parent_chunks ?? "-"} parent</div>
+                      <div className="text-gray-400">{activeRun.pac_ingest?.child_chunks ?? "-"} child</div>
+                    </div>
+                    <div className="px-3 py-2">
+                      <div className="text-[10px] text-gray-400 mb-0.5">Graph Graph</div>
+                      <div className="font-medium text-purple-600">{activeRun.graphrag_ingest?.sections ?? "-"} sections</div>
+                      <div className="text-gray-400">{activeRun.graphrag_ingest?.relations ?? "-"} relations</div>
                     </div>
                   </div>
 
@@ -3122,7 +3222,7 @@ export function AIChatWorkspace() {
                     {(['metrics', 'sources'] as const).map((tab) => (
                       <button
                         key={tab}
-                        onClick={() => setCompareTab(tab)}
+                        onClick={() => setCompareTab(tab as any)}
                         className={`flex-1 py-2 font-medium transition-colors ${
                           compareTab === tab
                             ? 'text-blue-600 border-b-2 border-blue-500 bg-white'
@@ -3138,102 +3238,101 @@ export function AIChatWorkspace() {
                   <div className="p-3">
                     {/* METRICS TAB */}
                     {compareTab === 'metrics' && (
-                      <div className="grid grid-cols-2 gap-3 text-xs">
-                        {/* PaCRAG */}
-                        <div className="space-y-1">
-                          <div className="font-semibold text-blue-600 mb-1">PaCRAG</div>
-                          {isComparingQuery ? <Spin size="small" /> : (
-                            <>
-                              <div className="flex items-center justify-between">
-                                <span className="text-gray-500">Time</span>
-                                <span className="flex items-center gap-1">{activeRun.pac_query?.time_total_s ?? "-"}s <QualityBadge show={isBetter("time_total_s", "pac", activeRun.pac_query, activeRun.graphrag_query)} /></span>
+                      <div className="space-y-3 text-xs">
+                        {!activeRun.pac_query && !activeRun.graphrag_query && !isComparingQuery && (
+                          <div className="flex flex-col items-center py-6 text-gray-400 gap-1">
+                            <div className="text-xl">💬</div>
+                            <div className="font-medium text-sm">Chưa có kết quả query</div>
+                            <div className="text-[11px] text-center">Gửi câu hỏi ở trên để xem metrics so sánh</div>
+                          </div>
+                        )}
+                        {isComparingQuery && (
+                          <div className="flex items-center justify-center gap-2 py-4 text-blue-500">
+                            <Spin size="small" />
+                            <span>Đang chạy query trên cả hai hệ thống...</span>
+                          </div>
+                        )}
+                        {(activeRun.pac_query || activeRun.graphrag_query) && !isComparingQuery && (
+                          <div className="grid grid-cols-2 gap-4">
+                            <div>
+                              <div className="flex items-center gap-1.5 mb-2">
+                                <span className="w-2 h-2 rounded-full bg-blue-500 inline-block"></span>
+                                <span className="font-semibold text-blue-600">PaCRAG</span>
+                                {activeRun.pac_query && (
+                                  <span className="ml-auto text-[10px] text-gray-400">{activeRun.pac_query.retrieved_chunk_count ?? 0} chunks</span>
+                                )}
                               </div>
-                              <div className="flex items-center justify-between">
-                                <span className="text-gray-500">Tokens</span>
-                                <span>{activeRun.pac_query?.answer_tokens ?? "-"}</span>
-                              </div>
-                              <div className="flex items-center justify-between">
-                                <span className="text-gray-500">Words</span>
-                                <span className="flex items-center gap-1">{activeRun.pac_query?.word_count ?? "N/A"} <QualityBadge show={isBetter("word_count", "pac", activeRun.pac_query, activeRun.graphrag_query)} /></span>
-                              </div>
-                              <div className="flex items-center justify-between">
-                                <span className="text-gray-500">Relevance</span>
-                                <span className="flex items-center gap-1">{activeRun.pac_query?.relevance_score != null ? activeRun.pac_query.relevance_score.toFixed(4) : "N/A"} <QualityBadge show={isBetter("relevance_score", "pac", activeRun.pac_query, activeRun.graphrag_query)} /></span>
-                              </div>
-                              <div className="flex items-center justify-between">
-                                <span className="text-gray-500">Coverage</span>
-                                <span className="flex items-center gap-1">{activeRun.pac_query?.source_coverage != null ? `${(activeRun.pac_query.source_coverage * 100).toFixed(1)}%` : "N/A"} <QualityBadge show={isBetter("source_coverage", "pac", activeRun.pac_query, activeRun.graphrag_query)} /></span>
-                              </div>
-                              <div className="flex items-center justify-between">
-                                <span className="text-gray-500">Confidence</span>
-                                <ConfidenceBadge score={activeRun.pac_query?.confidence_score} />
-                              </div>
-                              {activeRun.pac_query?.reranking_scores && (
-                                <div className="flex items-center justify-between">
-                                  <span className="text-gray-500">Rerank</span>
-                                  <span className="text-[10px] text-gray-600">
-                                    {activeRun.pac_query.reranking_scores.slice(0, 3).map((s: number) => s.toFixed(1)).join(", ")}
-                                    {activeRun.pac_query.reranking_time_s != null && ` (${activeRun.pac_query.reranking_time_s}s)`}
-                                  </span>
+                              <div className="space-y-1.5">
+                                <MetricRow label="Thời gian" value={activeRun.pac_query?.time_total_s != null ? `${activeRun.pac_query.time_total_s}s` : null} better={isBetter("time_total_s", "pac", activeRun.pac_query, activeRun.graphrag_query)} lowerIsBetter />
+                                <MetricRow label="Tokens" value={activeRun.pac_query?.answer_tokens != null ? String(activeRun.pac_query.answer_tokens) : null} />
+                                <MetricRow label="Số từ" value={activeRun.pac_query?.word_count != null ? String(activeRun.pac_query.word_count) : null} better={isBetter("word_count", "pac", activeRun.pac_query, activeRun.graphrag_query)} />
+                                <MetricRow label="Relevance" value={activeRun.pac_query?.relevance_score != null ? activeRun.pac_query.relevance_score.toFixed(4) : null} better={isBetter("relevance_score", "pac", activeRun.pac_query, activeRun.graphrag_query)} />
+                                <MetricRow label="Coverage" value={activeRun.pac_query?.source_coverage != null ? `${(activeRun.pac_query.source_coverage * 100).toFixed(1)}%` : null} better={isBetter("source_coverage", "pac", activeRun.pac_query, activeRun.graphrag_query)} />
+                                <div className="flex items-center justify-between py-0.5">
+                                  <span className="text-gray-500">Confidence</span>
+                                  <ConfidenceBadge score={activeRun.pac_query?.confidence_score} />
                                 </div>
-                              )}
-                            </>
-                          )}
-                        </div>
-                        {/* GraphRAG */}
-                        <div className="space-y-1">
-                          <div className="font-semibold text-purple-600 mb-1">GraphRAG</div>
-                          {isComparingQuery ? <Spin size="small" /> : (
-                            <>
-                              <div className="flex items-center justify-between">
-                                <span className="text-gray-500">Time</span>
-                                <span className="flex items-center gap-1">{activeRun.graphrag_query?.time_total_s ?? "-"}s <QualityBadge show={isBetter("time_total_s", "graph", activeRun.pac_query, activeRun.graphrag_query)} /></span>
+                                {activeRun.pac_query?.reranking_scores && activeRun.pac_query.reranking_scores.length > 0 && (
+                                  <div className="mt-1 pt-1 border-t border-gray-100">
+                                    <div className="text-gray-400 mb-0.5">Re-ranking scores</div>
+                                    <div className="flex flex-wrap gap-1">
+                                      {activeRun.pac_query.reranking_scores.map((s: number, i: number) => (
+                                        <span key={i} className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${s >= 7 ? "bg-green-100 text-green-700" : s >= 4 ? "bg-yellow-100 text-yellow-700" : "bg-red-100 text-red-700"}`}>{s.toFixed(1)}</span>
+                                      ))}
+                                    </div>
+                                    {activeRun.pac_query.reranking_time_s != null && (
+                                      <div className="text-[10px] text-gray-400 mt-0.5">⏱ {activeRun.pac_query.reranking_time_s}s</div>
+                                    )}
+                                  </div>
+                                )}
                               </div>
-                              <div className="flex items-center justify-between">
-                                <span className="text-gray-500">Tokens</span>
-                                <span>{activeRun.graphrag_query?.answer_tokens ?? "-"}</span>
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-1.5 mb-2">
+                                <span className="w-2 h-2 rounded-full bg-purple-500 inline-block"></span>
+                                <span className="font-semibold text-purple-600">GraphRAG</span>
+                                {activeRun.graphrag_query && (
+                                  <span className="ml-auto text-[10px] text-gray-400">{activeRun.graphrag_query.retrieved_chunk_count ?? 0} chunks</span>
+                                )}
                               </div>
-                              <div className="flex items-center justify-between">
-                                <span className="text-gray-500">Words</span>
-                                <span className="flex items-center gap-1">{activeRun.graphrag_query?.word_count ?? "N/A"} <QualityBadge show={isBetter("word_count", "graph", activeRun.pac_query, activeRun.graphrag_query)} /></span>
-                              </div>
-                              <div className="flex items-center justify-between">
-                                <span className="text-gray-500">Relevance</span>
-                                <span className="flex items-center gap-1">{activeRun.graphrag_query?.relevance_score != null ? activeRun.graphrag_query.relevance_score.toFixed(4) : "N/A"} <QualityBadge show={isBetter("relevance_score", "graph", activeRun.pac_query, activeRun.graphrag_query)} /></span>
-                              </div>
-                              <div className="flex items-center justify-between">
-                                <span className="text-gray-500">Coverage</span>
-                                <span className="flex items-center gap-1">{activeRun.graphrag_query?.source_coverage != null ? `${(activeRun.graphrag_query.source_coverage * 100).toFixed(1)}%` : "N/A"} <QualityBadge show={isBetter("source_coverage", "graph", activeRun.pac_query, activeRun.graphrag_query)} /></span>
-                              </div>
-                              <div className="flex items-center justify-between">
-                                <span className="text-gray-500">Confidence</span>
-                                <ConfidenceBadge score={activeRun.graphrag_query?.confidence_score} />
-                              </div>
-                              {activeRun.graphrag_query?.reranking_scores && (
-                                <div className="flex items-center justify-between">
-                                  <span className="text-gray-500">Rerank</span>
-                                  <span className="text-[10px] text-gray-600">
-                                    {activeRun.graphrag_query.reranking_scores.slice(0, 3).map((s: number) => s.toFixed(1)).join(", ")}
-                                    {activeRun.graphrag_query.reranking_time_s != null && ` (${activeRun.graphrag_query.reranking_time_s}s)`}
-                                  </span>
+                              <div className="space-y-1.5">
+                                <MetricRow label="Thời gian" value={activeRun.graphrag_query?.time_total_s != null ? `${activeRun.graphrag_query.time_total_s}s` : null} better={isBetter("time_total_s", "graph", activeRun.pac_query, activeRun.graphrag_query)} lowerIsBetter />
+                                <MetricRow label="Tokens" value={activeRun.graphrag_query?.answer_tokens != null ? String(activeRun.graphrag_query.answer_tokens) : null} />
+                                <MetricRow label="Số từ" value={activeRun.graphrag_query?.word_count != null ? String(activeRun.graphrag_query.word_count) : null} better={isBetter("word_count", "graph", activeRun.pac_query, activeRun.graphrag_query)} />
+                                <MetricRow label="Relevance" value={activeRun.graphrag_query?.relevance_score != null ? activeRun.graphrag_query.relevance_score.toFixed(4) : null} better={isBetter("relevance_score", "graph", activeRun.pac_query, activeRun.graphrag_query)} />
+                                <MetricRow label="Coverage" value={activeRun.graphrag_query?.source_coverage != null ? `${(activeRun.graphrag_query.source_coverage * 100).toFixed(1)}%` : null} better={isBetter("source_coverage", "graph", activeRun.pac_query, activeRun.graphrag_query)} />
+                                <div className="flex items-center justify-between py-0.5">
+                                  <span className="text-gray-500">Confidence</span>
+                                  <ConfidenceBadge score={activeRun.graphrag_query?.confidence_score} />
                                 </div>
-                              )}
-                            </>
-                          )}
-                        </div>
+                                {activeRun.graphrag_query?.reranking_scores && activeRun.graphrag_query.reranking_scores.length > 0 && (
+                                  <div className="mt-1 pt-1 border-t border-gray-100">
+                                    <div className="text-gray-400 mb-0.5">Re-ranking scores</div>
+                                    <div className="flex flex-wrap gap-1">
+                                      {activeRun.graphrag_query.reranking_scores.map((s: number, i: number) => (
+                                        <span key={i} className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${s >= 7 ? "bg-green-100 text-green-700" : s >= 4 ? "bg-yellow-100 text-yellow-700" : "bg-red-100 text-red-700"}`}>{s.toFixed(1)}</span>
+                                      ))}
+                                    </div>
+                                    {activeRun.graphrag_query.reranking_time_s != null && (
+                                      <div className="text-[10px] text-gray-400 mt-0.5">⏱ {activeRun.graphrag_query.reranking_time_s}s</div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
 
                     {/* SOURCES TAB */}
                     {compareTab === 'sources' && (
                       <div className="grid grid-cols-2 gap-3 text-xs">
-                        {/* PaCRAG sources – group by filename */}
                         <div>
                           <div className="font-semibold text-blue-600 mb-1">PaCRAG</div>
                           {!activeRun.pac_query?.retrieved_chunks?.length
                             ? <span className="text-gray-400 italic">Chưa có nguồn</span>
                             : (() => {
-                                // Group chunks by filename
                                 const grouped = new Map<string, RetrievedPassage[]>();
                                 (activeRun.pac_query.retrieved_chunks as RetrievedPassage[]).forEach((chunk) => {
                                   const key = chunk.filename || "Không rõ";
@@ -3245,11 +3344,7 @@ export function AIChatWorkspace() {
                                     <div className="font-medium text-gray-600 truncate" title={filename}>{filename}</div>
                                     <div className="pl-2 space-y-0.5">
                                       {chunks.map((chunk, i) => (
-                                        <button
-                                          key={i}
-                                          className="text-left text-blue-500 hover:text-blue-700 block text-[10px]"
-                                          onClick={() => setCitationModal({ open: true, passage: chunk, query: lastQuery })}
-                                        >
+                                        <button key={i} className="text-left text-blue-500 hover:text-blue-700 block text-[10px]" onClick={() => setCitationModal({ open: true, passage: chunk, query: lastQuery })}>
                                           tr. {chunk.pages?.length ? chunk.pages.join(",") : "?"}
                                         </button>
                                       ))}
@@ -3259,7 +3354,6 @@ export function AIChatWorkspace() {
                               })()
                           }
                         </div>
-                        {/* GraphRAG sources */}
                         <div>
                           <div className="font-semibold text-purple-600 mb-1">GraphRAG</div>
                           {!activeRun.graphrag_query?.doc_passages?.length
@@ -3276,11 +3370,7 @@ export function AIChatWorkspace() {
                                     <div className="font-medium text-gray-600 truncate" title={filename}>{filename}</div>
                                     <div className="pl-2 space-y-0.5">
                                       {passages.map((p, i) => (
-                                        <button
-                                          key={i}
-                                          className="text-left text-purple-500 hover:text-purple-700 block text-[10px]"
-                                          onClick={() => setCitationModal({ open: true, passage: p, query: lastQuery })}
-                                        >
+                                        <button key={i} className="text-left text-purple-500 hover:text-purple-700 block text-[10px]" onClick={() => setCitationModal({ open: true, passage: p, query: lastQuery })}>
                                           tr. {p.pages?.length ? p.pages.join(",") : "?"}
                                         </button>
                                       ))}
