@@ -106,6 +106,9 @@ interface QueryMetrics {
   retrieved_chunks?: RetrievedPassage[];   // PaCRAG
   doc_passages?: RetrievedPassage[];       // GraphRAG
   sources?: { filename: string; pages: number[] }[];
+  confidence_score?: number | null;
+  reranking_scores?: number[] | null;
+  reranking_time_s?: number | null;
 }
 
 interface CitationModalState {
@@ -290,7 +293,7 @@ export class ChatService {
     }
   }
 
-  async *streamChat(prompt: string, sessionId: string, turnId?: string) {
+  async *streamChat(prompt: string, sessionId: string, turnId?: string, sourceFilter?: string | null, sourceFilters?: string[] | null) {
     const res = await fetch(this.CHAT_URL.STREAM, {
       method: 'POST',
       headers: {
@@ -301,6 +304,8 @@ export class ChatService {
         session_id: sessionId || 'anonymous',
         // Nếu có turn_id (từ compare flow), truyền xuống để không tạo turn mới
         ...(turnId ? { turn_id: turnId, save_history: false } : {}),
+        ...(sourceFilter ? { source_filter: sourceFilter } : {}),
+        ...(sourceFilters && sourceFilters.length > 0 ? { source_filters: sourceFilters } : {}),
       }),
     });
 
@@ -500,7 +505,7 @@ export class ChatService {
     return response.json();
   }
 
-  async compareQuery(sessionId: string, runId: string, query: string) {
+  async compareQuery(sessionId: string, runId: string, query: string, rerankingEnabled: boolean = false, sourceFilter: string | null = null, sourceFilters: string[] | null = null) {
     const response = await fetch(this.CHAT_URL.COMPARE_QUERY, {
       method: "POST",
       headers: {
@@ -510,6 +515,9 @@ export class ChatService {
         session_id: sessionId || "anonymous",
         run_id: runId,
         query,
+        reranking_enabled: rerankingEnabled,
+        ...(sourceFilter ? { source_filter: sourceFilter } : {}),
+        ...(sourceFilters && sourceFilters.length > 0 ? { source_filters: sourceFilters } : {}),
       }),
     });
 
@@ -823,6 +831,8 @@ export function useAIChat(sessionId: string) {
   const sendMessage = useCallback(async (
     text: string,
     onUpdate: (msg: Message) => void,
+    sourceFilter?: string | null,
+    sourceFilters?: string[] | null,
   ): Promise<string> => {
     if (!text.trim()) return "";
 
@@ -840,7 +850,7 @@ export function useAIChat(sessionId: string) {
     });
 
     try {
-      for await (const chunk of chatService.streamChat(text, sessionId)) {
+      for await (const chunk of chatService.streamChat(text, sessionId, undefined, sourceFilter, sourceFilters)) {
         accumulatedContent += chunk;
         onUpdate({
           id: aiMsgId,
@@ -1016,6 +1026,21 @@ function QualityBadge({ show }: { show: boolean }) {
   return (
     <span className="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-700">
       ✓ Tốt hơn
+    </span>
+  );
+}
+
+// Confidence Badge Component
+function ConfidenceBadge({ score }: { score: number | null | undefined }) {
+  if (score == null) return <span className="text-gray-400 text-[10px]">N/A</span>;
+  const colorClass = score > 0.7
+    ? "text-green-700 bg-green-50 border border-green-200"
+    : score >= 0.4
+    ? "text-yellow-700 bg-yellow-50 border border-yellow-200"
+    : "text-red-700 bg-red-50 border border-red-200";
+  return (
+    <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${colorClass}`}>
+      {(score * 100).toFixed(0)}%
     </span>
   );
 }
@@ -2183,7 +2208,8 @@ export function AIChatWorkspace() {
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [lastQuery, setLastQuery] = useState("");
   const [citationModal, setCitationModal] = useState<CitationModalState>({ open: false, passage: null, query: "" });
-  const [compareTab, setCompareTab] = useState<'metrics' | 'answers' | 'sources'>('metrics');
+  const [compareTab, setCompareTab] = useState<'metrics' | 'sources'>('metrics');
+  const [rerankingEnabled, setRerankingEnabled] = useState(false);
 
   const { data: compareHistory, isLoading: isCompareHistoryLoading } = useQuery({
     queryKey: ["compare_history", userId || "anonymous"],
@@ -2207,7 +2233,9 @@ export function AIChatWorkspace() {
         const name = run.file_name;
         if (!name) return;
         if (!existing.has(name)) {
-          existing.set(name, { name, selected: true });
+          // Thêm file mới từ compareRuns nhưng KHÔNG tự chọn (selected: false)
+          // User phải chủ động tích để filter
+          existing.set(name, { name, selected: false });
         }
       });
       return Array.from(existing.values());
@@ -2237,8 +2265,8 @@ export function AIChatWorkspace() {
   }, queryClient);
 
   const { mutateAsync: compareQuery, isPending: isComparingQuery } = useMutation({
-    mutationFn: (payload: { runId: string; query: string }) =>
-      chatService.compareQuery(userId || "anonymous", payload.runId, payload.query),
+    mutationFn: (payload: { runId: string; query: string; rerankingEnabled?: boolean; sourceFilter?: string | null; sourceFilters?: string[] | null }) =>
+      chatService.compareQuery(userId || "anonymous", payload.runId, payload.query, payload.rerankingEnabled ?? false, payload.sourceFilter ?? null, payload.sourceFilters ?? null),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["compare_history", userId] });
     }
@@ -2388,6 +2416,13 @@ export function AIChatWorkspace() {
 
     // Chạy PaCRAG stream và GraphRAG song song
     // sendMessage trả về Promise<string> với full answer khi stream xong
+    const selectedFiles = uploadedFiles.filter((f) => f.selected);
+    // Nếu không có file nào được tích → search toàn bộ (không filter)
+    // Nếu có 1 file tích → single filter
+    // Nếu có nhiều file tích → multi-source OR filter
+    const activeSourceFilter = selectedFiles.length === 1 ? selectedFiles[0].name : null;
+    const activeSourceFilters = selectedFiles.length > 1 ? selectedFiles.map((f) => f.name) : null;
+
     const ragPromise = sendMessage(currentInput, (msg: any) => {
       if (msg.role === "user") return;
       setRagMessages((prev: any) => {
@@ -2395,14 +2430,13 @@ export function AIChatWorkspace() {
         if (exist) return prev.map((m: any) => (m.id === msg.id ? msg : m));
         return [...prev, msg];
       });
-    });
+    }, activeSourceFilter, activeSourceFilters);
 
     const graphPromise = (async (): Promise<string> => {
       setIsGraphThinking(true);
       try {
-        const selectedSource = uploadedFiles.find((f) => f.selected)?.name || null;
         if (activeRunId) {
-          const result = await compareQuery({ runId: activeRunId, query: currentInput });
+          const result = await compareQuery({ runId: activeRunId, query: currentInput, rerankingEnabled, sourceFilter: activeSourceFilter, sourceFilters: activeSourceFilters });
           const run = result?.data?.run;
           const ans = run?.graphrag_query?.answer || "";
           if (ans) {
@@ -2410,7 +2444,7 @@ export function AIChatWorkspace() {
             return ans;
           }
         }
-        const fallback = await chatService.graphQuery(currentInput, userId || "anonymous", selectedSource);
+        const fallback = await chatService.graphQuery(currentInput, userId || "anonymous", activeSourceFilter);
         const ans = fallback?.data?.answer || "";
         appendGraphAnswer(ans || "GraphRAG chưa có câu trả lời phù hợp.", fallback?.data?.sources);
         return ans;
@@ -2864,6 +2898,28 @@ export function AIChatWorkspace() {
 
             <div className="border-t border-gray-200 p-3 bg-white">
               <div className="flex flex-col gap-2">
+                {/* Re-ranking toggle */}
+                {activeRunId && (
+                  <div className="flex items-center gap-2 text-xs">
+                    <label className="flex items-center gap-1.5 cursor-pointer select-none text-gray-600">
+                      <input
+                        type="checkbox"
+                        checked={rerankingEnabled}
+                        onChange={(e) => setRerankingEnabled(e.target.checked)}
+                        className="w-3.5 h-3.5 accent-blue-500"
+                      />
+                      <span
+                        title="Re-ranking dùng LLM để chấm điểm lại từng đoạn văn bản sau khi truy xuất (0-10), sắp xếp lại theo mức độ liên quan với câu hỏi. Giúp cải thiện chất lượng câu trả lời nhưng tăng thời gian xử lý (~2-5s thêm mỗi đoạn)."
+                        className="cursor-help border-b border-dashed border-gray-400"
+                      >
+                        Bật re-ranking
+                      </span>
+                    </label>
+                    {rerankingEnabled && (
+                      <span className="text-[10px] text-orange-500">⚠ Chậm hơn</span>
+                    )}
+                  </div>
+                )}
                 <textarea
                   className="w-full border border-gray-300 rounded-xl p-3 resize-none focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none text-sm"
                   rows={3}
@@ -2964,17 +3020,33 @@ export function AIChatWorkspace() {
 
       {/* So sánh PaCRAG vs GraphRAG - section riêng bên dưới */}
       <div className="mx-4 mb-4 rounded-2xl smartchatbot-frame">
-        <div className="px-4 py-3 border-b border-gray-200 text-sm font-semibold bg-white rounded-t-2xl">
-          So sánh PaCRAG vs GraphRAG
+        <div className="px-4 py-3 border-b border-gray-200 bg-white rounded-t-2xl flex items-center justify-between">
+          <div>
+            <div className="text-sm font-semibold">So sánh PaCRAG vs GraphRAG</div>
+            <div className="text-[11px] text-gray-400 mt-0.5">Kết quả được cập nhật tự động sau mỗi câu hỏi</div>
+          </div>
+          {isComparingQuery && (
+            <div className="flex items-center gap-2 text-xs text-blue-500">
+              <Spin size="small" />
+              <span>Đang so sánh...</span>
+            </div>
+          )}
         </div>
         <div className="p-4 text-xs">
           {isCompareHistoryLoading ? (
-            <div className="text-gray-400">Đang tải lịch sử...</div>
+            <div className="flex items-center gap-2 text-gray-400 py-4">
+              <Spin size="small" />
+              <span>Đang tải dữ liệu so sánh...</span>
+            </div>
           ) : compareRuns.length === 0 ? (
-            <div className="text-gray-400">Chưa có dữ liệu so sánh. Upload file để bắt đầu so sánh.</div>
+            <div className="flex flex-col items-center justify-center py-8 text-gray-400 gap-2">
+              <div className="text-2xl">📊</div>
+              <div className="font-medium">Chưa có dữ liệu so sánh</div>
+              <div className="text-[11px] text-center">Upload file PDF/DOCX và gửi câu hỏi để xem kết quả so sánh PaCRAG vs GraphRAG tại đây</div>
+            </div>
           ) : (
             <div className="space-y-4">
-              {/* Danh sách runs */}
+              {/* Danh sách runs – hiển thị theo câu hỏi */}
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
                 {compareRuns.map((run: any) => (
                   <div
@@ -2982,11 +3054,21 @@ export function AIChatWorkspace() {
                     className={`border rounded-xl p-3 cursor-pointer transition hover:shadow-sm ${activeRunId === run.id ? "border-blue-500 bg-blue-50" : "border-gray-200 bg-white"}`}
                     onClick={() => setActiveRunId(run.id)}
                   >
-                    <div className="font-semibold truncate text-xs">{run.file_name}</div>
-                    <div className="text-[10px] text-gray-400 mt-0.5">{run.created_at || ""}</div>
+                    {/* Câu hỏi (nếu có) hoặc tên file */}
+                    <div
+                      className="font-semibold text-xs line-clamp-2 leading-tight"
+                      title={run.query_text || run.file_name}
+                    >
+                      {run.query_text
+                        ? <><span className="text-blue-500 mr-1">Q:</span>{run.query_text}</>
+                        : <><span className="text-gray-400 mr-1">📄</span>{run.file_name}</>
+                      }
+                    </div>
+                    <div className="text-[10px] text-gray-400 mt-0.5 truncate">{run.file_name}</div>
+                    <div className="text-[10px] text-gray-400">{run.created_at || ""}</div>
                     <div className="mt-2 flex justify-between text-[11px]">
-                      <span className="text-blue-600">PaC {run.pac_ingest?.time_total_s ?? "-"}s</span>
-                      <span className="text-purple-600">Graph {run.graphrag_ingest?.time_total_s ?? "-"}s</span>
+                      <span className="text-blue-600">PaC {run.pac_query?.time_total_s ?? run.pac_ingest?.time_total_s ?? "-"}s</span>
+                      <span className="text-purple-600">Graph {run.graphrag_query?.time_total_s ?? run.graphrag_ingest?.time_total_s ?? "-"}s</span>
                     </div>
                     <Button
                       size="small"
@@ -3008,8 +3090,17 @@ export function AIChatWorkspace() {
                 <div className="border border-gray-200 rounded-xl bg-white overflow-hidden">
                   {/* Header */}
                   <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-                    <div className="font-semibold text-sm truncate text-gray-700" title={activeRun.file_name}>
-                      📄 {activeRun.file_name}
+                    <div className="flex-1 min-w-0">
+                      {activeRun.query_text ? (
+                        <div className="font-semibold text-sm text-gray-700 line-clamp-2" title={activeRun.query_text}>
+                          <span className="text-blue-500 mr-1">Q:</span>{activeRun.query_text}
+                        </div>
+                      ) : (
+                        <div className="font-semibold text-sm truncate text-gray-700" title={activeRun.file_name}>
+                          📄 {activeRun.file_name}
+                        </div>
+                      )}
+                      <div className="text-[10px] text-gray-400 mt-0.5 truncate">📄 {activeRun.file_name}</div>
                     </div>
                     {isComparingQuery && <Spin size="small" />}
                   </div>
@@ -3028,7 +3119,7 @@ export function AIChatWorkspace() {
 
                   {/* Tabs */}
                   <div className="flex border-b border-gray-100 text-xs">
-                    {(['metrics', 'answers', 'sources'] as const).map((tab) => (
+                    {(['metrics', 'sources'] as const).map((tab) => (
                       <button
                         key={tab}
                         onClick={() => setCompareTab(tab)}
@@ -3038,7 +3129,7 @@ export function AIChatWorkspace() {
                             : 'text-gray-500 hover:text-gray-700 bg-gray-50'
                         }`}
                       >
-                        {tab === 'metrics' ? '📊 Metrics' : tab === 'answers' ? '💬 Trả lời' : '📎 Nguồn'}
+                        {tab === 'metrics' ? '📊 Metrics' : '📎 Nguồn'}
                       </button>
                     ))}
                   </div>
@@ -3073,6 +3164,19 @@ export function AIChatWorkspace() {
                                 <span className="text-gray-500">Coverage</span>
                                 <span className="flex items-center gap-1">{activeRun.pac_query?.source_coverage != null ? `${(activeRun.pac_query.source_coverage * 100).toFixed(1)}%` : "N/A"} <QualityBadge show={isBetter("source_coverage", "pac", activeRun.pac_query, activeRun.graphrag_query)} /></span>
                               </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-gray-500">Confidence</span>
+                                <ConfidenceBadge score={activeRun.pac_query?.confidence_score} />
+                              </div>
+                              {activeRun.pac_query?.reranking_scores && (
+                                <div className="flex items-center justify-between">
+                                  <span className="text-gray-500">Rerank</span>
+                                  <span className="text-[10px] text-gray-600">
+                                    {activeRun.pac_query.reranking_scores.slice(0, 3).map((s: number) => s.toFixed(1)).join(", ")}
+                                    {activeRun.pac_query.reranking_time_s != null && ` (${activeRun.pac_query.reranking_time_s}s)`}
+                                  </span>
+                                </div>
+                              )}
                             </>
                           )}
                         </div>
@@ -3101,29 +3205,20 @@ export function AIChatWorkspace() {
                                 <span className="text-gray-500">Coverage</span>
                                 <span className="flex items-center gap-1">{activeRun.graphrag_query?.source_coverage != null ? `${(activeRun.graphrag_query.source_coverage * 100).toFixed(1)}%` : "N/A"} <QualityBadge show={isBetter("source_coverage", "graph", activeRun.pac_query, activeRun.graphrag_query)} /></span>
                               </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-gray-500">Confidence</span>
+                                <ConfidenceBadge score={activeRun.graphrag_query?.confidence_score} />
+                              </div>
+                              {activeRun.graphrag_query?.reranking_scores && (
+                                <div className="flex items-center justify-between">
+                                  <span className="text-gray-500">Rerank</span>
+                                  <span className="text-[10px] text-gray-600">
+                                    {activeRun.graphrag_query.reranking_scores.slice(0, 3).map((s: number) => s.toFixed(1)).join(", ")}
+                                    {activeRun.graphrag_query.reranking_time_s != null && ` (${activeRun.graphrag_query.reranking_time_s}s)`}
+                                  </span>
+                                </div>
+                              )}
                             </>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* ANSWERS TAB */}
-                    {compareTab === 'answers' && (
-                      <div className="grid grid-cols-2 gap-3 text-xs">
-                        <div>
-                          <div className="font-semibold text-blue-600 mb-1">PaCRAG</div>
-                          {isComparingQuery ? <Spin size="small" /> : (
-                            <div className="whitespace-pre-wrap max-h-60 overflow-y-auto text-gray-700 leading-relaxed">
-                              {activeRun.pac_query?.answer || <span className="text-gray-400 italic">Chưa có câu trả lời</span>}
-                            </div>
-                          )}
-                        </div>
-                        <div>
-                          <div className="font-semibold text-purple-600 mb-1">GraphRAG</div>
-                          {isComparingQuery ? <Spin size="small" /> : (
-                            <div className="whitespace-pre-wrap max-h-60 overflow-y-auto text-gray-700 leading-relaxed">
-                              {activeRun.graphrag_query?.answer || <span className="text-gray-400 italic">Chưa có câu trả lời</span>}
-                            </div>
                           )}
                         </div>
                       </div>
