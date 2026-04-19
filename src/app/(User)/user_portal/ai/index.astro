@@ -1,11 +1,8 @@
 ---
 import Rootlayout from "@/layouts/Rootlayout.astro";
-import { RouteGuard } from "@/components/RouteGuard";
 import { AIChatWorkspace } from "../UserPortalChat";
 ---
 
 <Rootlayout>
-  <RouteGuard client:only="react">
-    <AIChatWorkspace client:only="react" />
-  </RouteGuard>
+  <AIChatWorkspace client:only="react" />
 </Rootlayout>

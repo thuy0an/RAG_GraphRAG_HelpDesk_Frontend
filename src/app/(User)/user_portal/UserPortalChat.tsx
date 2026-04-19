@@ -2,7 +2,6 @@
 import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { queryClient, useMutation, useQuery } from "@/lib/ReactQuery";
-import { useAuthStore } from "../../auth/authStore";
 import UserHeader from "@/components/UserHeader";
 import { Button, Collapse, Empty, Image, message, Spin, Tooltip } from "antd";
 import {
@@ -863,15 +862,19 @@ export function useAIChat(sessionId: string) {
     } catch (err) {
       console.error(err);
       const errMsg = err instanceof Error ? err.message : "PaCRAG không phản hồi.";
-      const errorContent = `PaCRAG không trả lời được. ${errMsg}`;
-      onUpdate({
-        id: aiMsgId,
-        content: errorContent,
-        sender_id: "ai-assistant",
-        role: "ai",
-        created_at: new Date().toISOString(),
-      });
-      accumulatedContent = errorContent;
+      // Nếu server trả 200 nhưng stream rỗng thì accumulatedContent đã có nội dung
+      // Chỉ hiện lỗi nếu thực sự không có gì
+      if (!accumulatedContent) {
+        const errorContent = `PaCRAG không trả lời được: ${errMsg}`;
+        onUpdate({
+          id: aiMsgId,
+          content: errorContent,
+          sender_id: "ai-assistant",
+          role: "ai",
+          created_at: new Date().toISOString(),
+        });
+        accumulatedContent = errorContent;
+      }
     } finally {
       setIsStreaming(false);
     }
@@ -1997,8 +2000,7 @@ export function UserPortalChat() {
   const [chatMessages, setChatMessages] = useState<Message[]>([]);
   const [AIMessages, setAIMessages] = useState<Message[]>([]);
 
-  const { payload } = useAuthStore();
-  const userId = payload?.user_id || "";
+  const userId = "anonymous";
 
   const { data: conKeyData, isLoading: isLoadingConKey } = useConversationKey(userId, isChatOpen);
 
@@ -2102,9 +2104,8 @@ export function UserPortalChat() {
 
 // Full-page AI workspace
 export function AIChatWorkspace() {
-  const { payload } = useAuthStore();
-  const userId = payload?.user_id || "";
-  const storageKey = `smartchatbot_uploaded_files_${userId || "anonymous"}`;
+  const userId = "anonymous";
+  const storageKey = `smartchatbot_uploaded_files_anonymous`;
 
   const {
     historyMessages,
@@ -2249,15 +2250,19 @@ export function AIChatWorkspace() {
   }, [queryRuns, activeRunId]);
 
   useEffect(() => {
+    // Chỉ sync từ compareRuns nếu localStorage vẫn còn data
+    // (tránh thêm lại sau khi user đã xóa vector store)
     if (compareRuns.length === 0) return;
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (!raw) return; // localStorage đã bị xóa → không thêm lại
+    } catch {}
     setUploadedFiles((prev) => {
       const existing = new Map(prev.map((f) => [f.name, f]));
       compareRuns.forEach((run: any) => {
         const name = run.file_name;
         if (!name) return;
         if (!existing.has(name)) {
-          // Thêm file mới từ compareRuns nhưng KHÔNG tự chọn (selected: false)
-          // User phải chủ động tích để filter
           existing.set(name, { name, selected: false });
         }
       });
@@ -2329,25 +2334,40 @@ export function AIChatWorkspace() {
       message.error("Chưa có file hợp lệ để upload");
       return;
     }
-    try {
-      setUploadStatus("Đang upload...");
-      await uploadDocs({ files: readyFiles, config: chunkConfig });
-      message.success("Tải tài liệu thành công (PaCRAG + GraphRAG)");
-      setUploadStatus("Upload xong");
-      setUploadedFiles((prev) => {
-        const existing = new Map(prev.map((f) => [f.name, f]));
-        readyFiles.forEach((file) => {
+
+    setUploadStatus("Đang upload...");
+    let successCount = 0;
+
+    // Upload từng file một — chuyển sang "đã upload" ngay khi file đó xong
+    for (const file of readyFiles) {
+      try {
+        const data = await chatService.uploadCompare(userId || "anonymous", [file], chunkConfig);
+        const runs = data?.data?.runs || [];
+        if (runs.length > 0) {
+          setActiveRunId(runs[0].id);
+        }
+        queryClient.invalidateQueries({ queryKey: ["compare_history", userId] });
+
+        // Chuyển file này sang danh sách đã upload ngay lập tức
+        setUploadedFiles((prev) => {
+          const existing = new Map(prev.map((f) => [f.name, f]));
           if (!existing.has(file.name)) {
             existing.set(file.name, { name: file.name, selected: true });
           }
+          return Array.from(existing.values());
         });
-        return Array.from(existing.values());
-      });
-      setFiles([]);
-    } catch (err) {
-      setUploadStatus("Upload thất bại");
-      message.error("Tải tài liệu thất bại");
+
+        // Xóa file này khỏi danh sách chờ
+        setFiles((prev) => prev.filter((f) => f.file.name !== file.name));
+
+        successCount++;
+        message.success(`"${file.name}" đã upload xong`);
+      } catch (err) {
+        message.error(`"${file.name}" upload thất bại`);
+      }
     }
+
+    setUploadStatus(successCount > 0 ? "Upload xong" : "Upload thất bại");
   };
 
   const handleClearHistory = async () => {
@@ -2372,11 +2392,20 @@ export function AIChatWorkspace() {
   const handleClearVectorStore = async () => {
     if (!window.confirm("Bạn có chắc muốn xóa toàn bộ vector store (PaCRAG + GraphRAG)?")) return;
     try {
+      // Lấy danh sách compare runs hiện tại để xóa hết
+      const currentRuns: any[] = compareRuns || [];
+
       await Promise.allSettled([
         clearVectorStore(),
         chatService.deleteAllGraph(),
+        // Xóa toàn bộ compare runs trên server
+        ...currentRuns.map((run: any) => chatService.deleteCompareRun(run.id)),
       ]);
+
+      // Xóa state local và localStorage
       setUploadedFiles([]);
+      try { localStorage.removeItem(storageKey); } catch {}
+
       queryClient.invalidateQueries({ queryKey: ["compare_history", userId] });
       setActiveRunId(null);
       message.success("Đã xóa toàn bộ vector store (PaCRAG + GraphRAG)");
