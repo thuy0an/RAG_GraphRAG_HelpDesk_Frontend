@@ -1,6 +1,6 @@
-# AI HelpDesk Frontend
+# SmartDoc AI - Intelligent Document Q&A System (Frontend)
 
-Giao diện chatbot RAG cho hệ thống AI HelpDesk, xây dựng với Astro + React. Người dùng có thể upload tài liệu PDF/DOCX và đặt câu hỏi qua hai pipeline RAG song song: **PaCRAG** và **GraphRAG**.
+Giao diện chatbot RAG cho hệ thống SmartDoc AI - Intelligent Document Q&A System, xây dựng với Astro + React. Người dùng có thể upload tài liệu PDF/DOCX và đặt câu hỏi qua hai pipeline RAG song song: **PaCRAG** và **GraphRAG**.
 
 ---
 
@@ -81,7 +81,7 @@ npm run dev
 bun dev
 ```
 
-Mở trình duyệt tại `http://localhost:3000` — tự động redirect vào `/user_portal`.
+Mở trình duyệt tại `http://localhost:3000` — tự động redirect vào `/user_portal/smartchatbot`.
 
 ### Các lệnh khác
 
@@ -99,14 +99,14 @@ Mở trình duyệt tại `http://localhost:3000` — tự động redirect vào
 AI_HelpDesk_Frontend/
 ├── src/
 │   ├── app/
-│   │   ├── index.astro                        # Redirect → /user_portal
+│   │   ├── index.astro                        # Redirect → /user_portal/smartchatbot
 │   │   └── (User)/
 │   │       └── user_portal/
-│   │           ├── index.astro                # Entry point chatbot
+│   │           ├── index.astro                # Redirect -> /user_portal/smartchatbot
 │   │           ├── UserPortal.tsx             # Wrapper component
 │   │           ├── UserPortalChat.tsx         # Toàn bộ chatbot UI
 │   │           ├── ai/
-│   │           │   └── index.astro            # Route /user_portal/ai
+│   │           │   └── index.astro            # Redirect -> /user_portal/smartchatbot
 │   │           └── smartchatbot/
 │   │               └── index.astro            # Route /user_portal/smartchatbot
 │   ├── components/
@@ -135,7 +135,7 @@ AI_HelpDesk_Frontend/
 
 ### AIChatWorkspace (trang full-screen)
 
-Truy cập tại `/user_portal`, `/user_portal/ai`, hoặc `/user_portal/smartchatbot`.
+Truy cập tại `/user_portal/smartchatbot`.
 
 **Upload tài liệu**
 - Upload PDF / DOCX vào PaCRAG (Redis vector store)

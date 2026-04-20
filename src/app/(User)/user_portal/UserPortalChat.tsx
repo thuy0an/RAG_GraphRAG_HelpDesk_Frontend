@@ -4,6 +4,7 @@ import ReactMarkdown from "react-markdown";
 import { queryClient, useMutation, useQuery } from "@/lib/ReactQuery";
 import UserHeader from "@/components/UserHeader";
 import { Button, Collapse, Empty, Image, message, Spin, Tooltip } from "antd";
+import { Column } from "@ant-design/charts";
 import {
   CloudUploadOutlined,
   CloseOutlined,
@@ -11,6 +12,7 @@ import {
   FileTextOutlined,
   HistoryOutlined,
   PaperClipOutlined,
+  QuestionCircleOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
 import { PUBLIC_API_BASE_URL, PUBLIC_WS_BASE_URL } from "@/constants/constant";
@@ -26,21 +28,6 @@ interface Message {
   created_at?: string;
   conversation_key?: string;
   role?: 'user' | 'ai';
-}
-interface AIChatHistoryResponse {
-  message: string;
-  data: {
-    content: Array<{
-      id: string,
-      role: 'user' | 'ai';
-      content: string;
-      timestamp: string;
-    }>;
-    page_number: number;
-    page_size: number;
-    total_elements: number;
-  };
-  status_code: number;
 }
 
 // interface AIChatHistoryHook {
@@ -108,6 +95,24 @@ interface QueryMetrics {
   confidence_score?: number | null;
   reranking_scores?: number[] | null;
   reranking_time_s?: number | null;
+  metric_groups?: {
+    retrieval_metrics?: {
+      context_relevance?: number | null;
+      context_recall?: number | null;
+      context_precision?: number | null;
+      source_coverage?: number | null;
+      reranking_summary?: {
+        avg?: number | null;
+      } | null;
+    };
+    generation_metrics?: {
+      faithfulness_groundedness?: number | null;
+      answer_relevancy?: number | null;
+      answer_correctness?: number | null;
+      faithfulness_proxy?: number | null;
+      answer_relevance_proxy?: number | null;
+    };
+  };
 }
 
 interface CitationModalState {
@@ -233,6 +238,68 @@ export class Utility {
 }
 
 type MetricKey = 'time_total_s' | 'relevance_score' | 'source_coverage' | 'word_count';
+
+const METRIC_TOOLTIP_TEXT: Record<string, string> = {
+  relevance_score: "Độ tương đồng ngữ nghĩa giữa câu hỏi và câu trả lời.  ",
+  source_coverage: "Tỷ lệ nguồn truy xuất hữu ích được dùng để tạo câu trả lời.  ",
+  confidence_score: "Mức tự tin của hệ thống cho câu trả lời hiện tại (0-100%).  ",
+  context_relevance: "Mức độ các đoạn được truy xuất thực sự liên quan đến câu hỏi.",
+  context_recall: "Khả năng tìm đủ thông tin cần thiết trong kho tri thức.",
+  context_precision: "Mức độ tài liệu liên quan được xếp hạng cao trong top-K.",
+  faithfulness_groundedness: "Mức độ câu trả lời bám sát ngữ cảnh truy xuất, giảm hallucination.",
+  answer_relevancy: "Mức độ câu trả lời giải quyết trực tiếp câu hỏi người dùng.",
+  answer_correctness: "Mức độ đúng của câu trả lời so với đáp án chuẩn (ground truth/proxy).",
+};
+
+function normalizeUnitScore(value: unknown): number | null {
+  if (typeof value !== "number" || Number.isNaN(value)) return null;
+  if (value <= 0) return 0;
+  if (value <= 1) return value;
+  if (value <= 10) return value / 10;
+  if (value <= 100) return value / 100;
+  return 1;
+}
+
+function metricDescription(metricKey: string) {
+  return METRIC_TOOLTIP_TEXT[metricKey] || "";
+}
+
+interface ChartMetricDatum {
+  metric: string;
+  model: string;
+  score: number;
+  description: string;
+}
+
+function readRetrieverScores(metrics: QueryMetrics | null | undefined) {
+  const groups = metrics?.metric_groups?.retrieval_metrics;
+  const rerankingAvg = groups?.reranking_summary?.avg;
+  const fallbackPrecision = normalizeUnitScore(rerankingAvg) ?? normalizeUnitScore(metrics?.source_coverage);
+
+  return {
+    context_relevance: normalizeUnitScore(groups?.context_relevance) ?? normalizeUnitScore(metrics?.relevance_score),
+    context_recall: normalizeUnitScore(groups?.context_recall) ?? normalizeUnitScore(metrics?.source_coverage),
+    context_precision: normalizeUnitScore(groups?.context_precision) ?? fallbackPrecision,
+  };
+}
+
+function readGeneratorScores(metrics: QueryMetrics | null | undefined) {
+  const groups = metrics?.metric_groups?.generation_metrics;
+  const faithfulness = normalizeUnitScore(groups?.faithfulness_groundedness)
+    ?? normalizeUnitScore(groups?.faithfulness_proxy)
+    ?? normalizeUnitScore(metrics?.confidence_score);
+  const answerRelevancy = normalizeUnitScore(groups?.answer_relevancy)
+    ?? normalizeUnitScore(groups?.answer_relevance_proxy)
+    ?? normalizeUnitScore(metrics?.relevance_score);
+  const answerCorrectness = normalizeUnitScore(groups?.answer_correctness)
+    ?? ((faithfulness != null && answerRelevancy != null) ? (faithfulness + answerRelevancy) / 2 : null);
+
+  return {
+    faithfulness_groundedness: faithfulness,
+    answer_relevancy: answerRelevancy,
+    answer_correctness: answerCorrectness,
+  };
+}
 
 export function isBetter(
   metric: MetricKey,
@@ -782,7 +849,6 @@ export function useAIChatHistory(sessionId: string) {
   const {
     data,
     isLoading,
-    isError,
     error,
     refetch,
   } = useQuery({
@@ -1024,10 +1090,10 @@ export async function uploadFiles(files: File[]) {
 
 // ===== UI COMPONENTS =====
 // MetricRow helper component
-function MetricRow({ label, value, better, lowerIsBetter }: { label: string; value: string | null; better?: boolean; lowerIsBetter?: boolean }) {
+function MetricRow({ label, value, better, labelTooltipText }: { label: string; value: string | null; better?: boolean; labelTooltipText?: string }) {
   return (
     <div className="flex items-center justify-between py-0.5">
-      <span className="text-gray-500">{label}</span>
+      <MetricLabelWithTooltip label={label} tooltipText={labelTooltipText} />
       {value == null
         ? <span className="text-gray-300">-</span>
         : <span className={`flex items-center gap-1 font-medium ${better ? "text-green-600" : "text-gray-700"}`}>
@@ -1036,6 +1102,21 @@ function MetricRow({ label, value, better, lowerIsBetter }: { label: string; val
           </span>
       }
     </div>
+  );
+}
+
+function MetricLabelWithTooltip({ label, tooltipText }: { label: string; tooltipText?: string }) {
+  if (!tooltipText) {
+    return <span className="text-gray-500">{label}</span>;
+  }
+
+  return (
+    <Tooltip title={tooltipText}>
+      <span className="inline-flex items-center gap-1 text-gray-500 cursor-help">
+        {label}
+        <QuestionCircleOutlined className="text-gray-400" />
+      </span>
+    </Tooltip>
   );
 }
 
@@ -1122,16 +1203,16 @@ const renderPreviewAttachment = (file: File) => {
       <img
         src={URL.createObjectURL(file)}
         alt={file.name}
-        style={CONSTANT.STYLES.filePreview.image}
+        className="smartchatbot-preview-image"
       />
     );
   } else {
     return (
-      <div style={CONSTANT.STYLES.filePreview.fileWrapper}>
-        <div style={CONSTANT.STYLES.filePreview.fileIcon}>
-          <FileTextOutlined style={CONSTANT.STYLES.filePreview.fileIconSvg} />
+      <div className="smartchatbot-preview-file-wrapper">
+        <div className="smartchatbot-preview-file-icon">
+          <FileTextOutlined className="smartchatbot-preview-file-icon-svg" />
         </div>
-        <div style={CONSTANT.STYLES.filePreview.fileName}>
+        <div className="smartchatbot-preview-file-name">
           {file.name}
         </div>
       </div>
@@ -1164,30 +1245,19 @@ function MessageBubble({ msg, currentUserId }: { msg: Message; currentUserId: st
   return (
     <div className={`flex mb-3 ${isFromUser ? "justify-end" : "justify-start"}`}>
       {isImage ? (
-        <div style={{ maxWidth: "78%", borderRadius: "0", overflow: "hidden" }}>
+        <div className="smartchatbot-bubble-image-wrap">
           <Image width={220} src={msg.content} preview />
         </div>
       ) : (
         <div
-          style={{
-            maxWidth: "78%",
-            padding: "10px 12px",
-            borderRadius: "0",
-            background: isFromUser ? "#1877f2" : "#ffffff",
-            color: isFromUser ? "#fff" : "#111",
-            boxShadow: "0 1px 2px rgba(0,0,0,0.08)",
-            border: isFromUser ? "none" : "1px solid #e5e7eb",
-            wordBreak: "break-word"
-          }}
-          className="relative group"
+          className={`relative group smartchatbot-message-bubble ${isFromUser ? "smartchatbot-message-bubble-user" : "smartchatbot-message-bubble-ai"}`}
         >
           {isDocument ? (
             <a
               href={msg.content}
               target="_blank"
               rel="noopener noreferrer"
-              style={{ color: isFromUser ? "#fff" : "#1877f2" }}
-              className="underline"
+              className={`underline ${isFromUser ? "text-white" : "text-blue-600"}`}
             >
               {Utility.getFilenameFromUrl(msg.content)}
             </a>
@@ -1246,7 +1316,6 @@ function AIChatComponent(props: any) {
 
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<File[]>([]);
-  const [activeToolSections, setActiveToolSections] = useState<string[]>(["chunk"]);
   const [showChunkConfig, setShowChunkConfig] = useState(false);
   const [chunkConfig, setChunkConfig] = useState({
     parent_chunk_size: 2048,
@@ -1436,7 +1505,7 @@ function AIChatComponent(props: any) {
   return (
     <div className="flex h-full">
       <div className="flex flex-col flex-1">
-        <div style={CONSTANT.STYLES.messagesArea} ref={messagesRef}>
+        <div className="smartchatbot-messages-area" ref={messagesRef}>
         {mergedMessages.length === 0 ? (
           <Empty description="Bắt đầu trò chuyện với AI" style={{ marginTop: "100px" }} />
         ) : (
@@ -1457,15 +1526,7 @@ function AIChatComponent(props: any) {
 
             {isStreaming && (
               <div className="flex justify-start">
-                <div style={{
-                  maxWidth: "78%",
-                  padding: "10px 12px",
-                  borderRadius: "0",
-                  background: "#ffffff",
-                  color: "#111",
-                  boxShadow: "0 1px 2px rgba(0,0,0,0.08)",
-                  border: "1px solid #e5e7eb"
-                }}>
+                <div className="smartchatbot-message-bubble smartchatbot-message-bubble-ai">
                   <div className="text-sm">AI đang gõ<span className="animate-pulse">...</span></div>
                 </div>
               </div>
@@ -1481,8 +1542,10 @@ function AIChatComponent(props: any) {
               type="file"
               accept=".pdf,.doc,.docx"
               multiple
+              title="Chọn tài liệu PDF DOC DOCX"
+              aria-label="Chọn tài liệu PDF DOC DOCX"
               onChange={(e) => setFiles(Array.from(e.target.files || []))}
-              style={{ display: "none" }}
+              className="hidden"
               id="aiUploadInput"
             />
             <Button
@@ -1776,7 +1839,6 @@ function AIChatComponent(props: any) {
 
 // Normal Chat Component
 function NormalChatComponent({
-  isChatOpen,
   userId,
   messages,
   setMessages,
@@ -1788,7 +1850,6 @@ function NormalChatComponent({
 
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<File[]>([]);
-  const [previews, setPreviews] = useState<string[]>([]);
   const messagesAreaRef = useRef<HTMLDivElement>(null);
 
   const { data: chatroomMessages, isLoading: isLoadingChatroomMessages } = useMessages(conversationKey);
@@ -1836,13 +1897,6 @@ function NormalChatComponent({
         existingKeys.add(key);
         newFiles.push(file);
 
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-          if (ev.target?.result) {
-            setPreviews(prev => [...prev, ev.target!.result as string]);
-          }
-        };
-        reader.readAsDataURL(file);
       });
 
       return [...prevFiles, ...newFiles];
@@ -1854,7 +1908,6 @@ function NormalChatComponent({
 
   const removeFile = (idx: number) => {
     setFiles(prev => prev.filter((_, i) => i !== idx));
-    setPreviews(prev => prev.filter((_, i) => i !== idx));
   };
 
   const handleSendMessage = useCallback(async () => {
@@ -1902,7 +1955,6 @@ function NormalChatComponent({
           }
         });
 
-        setPreviews([]);
         setFiles([]);
       } catch {
         message.error("Tải lên thất bại!");
@@ -1917,7 +1969,7 @@ function NormalChatComponent({
 
   return (
     <>
-      <div style={CONSTANT.STYLES.messagesArea} ref={messagesAreaRef}>
+      <div className="smartchatbot-messages-area" ref={messagesAreaRef}>
         {messages.length === 0 ? (
           <div></div>
         ) : (
@@ -1939,7 +1991,7 @@ function NormalChatComponent({
         <div className="px-3 pb-2">
           <div className="flex gap-2 overflow-x-auto py-2 pt-4">
             {files.map((file, i) => (
-              <div key={i} style={CONSTANT.STYLES.filePreview.container}>
+              <div key={i} className="smartchatbot-file-preview-container">
                 {renderPreviewAttachment(file)}
                 <Button
                   type="text"
@@ -1947,7 +1999,7 @@ function NormalChatComponent({
                   icon={<CloseOutlined />}
                   size="small"
                   onClick={() => removeFile(i)}
-                  style={CONSTANT.STYLES.filePreview.removeBtn}
+                  className="smartchatbot-file-preview-remove"
                 />
               </div>
             ))}
@@ -1961,14 +2013,17 @@ function NormalChatComponent({
             type="file"
             accept="*"
             multiple
+            title="Đính kèm tệp"
+            aria-label="Đính kèm tệp"
             // Gán đúng handler
             onChange={handleFile}
-            style={{ display: "none" }}
+            className="hidden"
             id="fileInput"
           />
           <Button
             type="text"
             icon={<PaperClipOutlined />}
+            aria-label="Mở chọn tệp đính kèm"
             onClick={() => document.getElementById('fileInput')?.click()}
             disabled={!isConnected}
           />
@@ -2087,7 +2142,6 @@ export function UserPortalChat() {
               </div>
             </> :
               <NormalChatComponent
-                isChatOpen={isChatOpen}
                 userId={userId}
                 messages={chatMessages}
                 setMessages={setChatMessages}
@@ -2114,12 +2168,13 @@ export function AIChatWorkspace() {
     sendMessage
   } = useAIChat(userId);
 
-  const { messages: graphHistoryMessages, refetch: refetchGraphHistory } = useGraphRAGHistory(userId);
+  const { messages: graphHistoryMessages } = useGraphRAGHistory(userId);
 
   const [input, setInput] = useState("");
   const [files, setFiles] = useState<Array<{ file: File; enabled: boolean; error?: string }>>([]);
   const [activeToolSections, setActiveToolSections] = useState<string[]>(["upload", "chunk", "files"]);
   const [docPanelOpen, setDocPanelOpen] = useState(true);
+  const [toolPanelOpen, setToolPanelOpen] = useState(true);
   const [chunkConfig, setChunkConfig] = useState({
     parent_chunk_size: 2048,
     parent_chunk_overlap: 400,
@@ -2242,12 +2297,70 @@ export function AIChatWorkspace() {
   const compareRuns = compareHistory?.data?.runs || [];
   // Chỉ hiển thị các run đã có câu hỏi (query_text) trong bảng so sánh
   const queryRuns = compareRuns.filter((run: any) => !!run.query_text);
+  const activeRun = compareRuns.find((run: any) => run.id === activeRunId) || null;
+
+  const retrieverChartData = useMemo(() => {
+    if (!activeRun) return [] as ChartMetricDatum[];
+
+    const pac = readRetrieverScores(activeRun.pac_query);
+    const graph = readRetrieverScores(activeRun.graphrag_query);
+
+    const rows = [
+      { metric: "Context Relevance", metricKey: "context_relevance", model: "PaCRAG", score: pac.context_relevance },
+      { metric: "Context Relevance", metricKey: "context_relevance", model: "GraphRAG", score: graph.context_relevance },
+      { metric: "Context Recall", metricKey: "context_recall", model: "PaCRAG", score: pac.context_recall },
+      { metric: "Context Recall", metricKey: "context_recall", model: "GraphRAG", score: graph.context_recall },
+      { metric: "Context Precision", metricKey: "context_precision", model: "PaCRAG", score: pac.context_precision },
+      { metric: "Context Precision", metricKey: "context_precision", model: "GraphRAG", score: graph.context_precision },
+    ];
+
+    return rows
+      .filter((row): row is { metric: string; metricKey: string; model: string; score: number } => row.score != null)
+      .map((row) => ({
+        metric: row.metric,
+        model: row.model,
+        score: Number((row.score * 100).toFixed(2)),
+        description: metricDescription(row.metricKey),
+      }));
+  }, [activeRun]);
+
+  const generatorChartData = useMemo(() => {
+    if (!activeRun) return [] as ChartMetricDatum[];
+
+    const pac = readGeneratorScores(activeRun.pac_query);
+    const graph = readGeneratorScores(activeRun.graphrag_query);
+
+    const rows = [
+      { metric: "Faithfulness", metricKey: "faithfulness_groundedness", model: "PaCRAG", score: pac.faithfulness_groundedness },
+      { metric: "Faithfulness", metricKey: "faithfulness_groundedness", model: "GraphRAG", score: graph.faithfulness_groundedness },
+      { metric: "Answer Relevancy", metricKey: "answer_relevancy", model: "PaCRAG", score: pac.answer_relevancy },
+      { metric: "Answer Relevancy", metricKey: "answer_relevancy", model: "GraphRAG", score: graph.answer_relevancy },
+      { metric: "Answer Correctness", metricKey: "answer_correctness", model: "PaCRAG", score: pac.answer_correctness },
+      { metric: "Answer Correctness", metricKey: "answer_correctness", model: "GraphRAG", score: graph.answer_correctness },
+    ];
+
+    return rows
+      .filter((row): row is { metric: string; metricKey: string; model: string; score: number } => row.score != null)
+      .map((row) => ({
+        metric: row.metric,
+        model: row.model,
+        score: Number((row.score * 100).toFixed(2)),
+        description: metricDescription(row.metricKey),
+      }));
+  }, [activeRun]);
 
   useEffect(() => {
     if (!activeRunId && queryRuns.length > 0) {
       setActiveRunId(queryRuns[0].id);
     }
   }, [queryRuns, activeRunId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (window.innerWidth < 1280) {
+      setToolPanelOpen(false);
+    }
+  }, []);
 
   useEffect(() => {
     // Chỉ sync từ compareRuns nếu localStorage vẫn còn data
@@ -2277,20 +2390,6 @@ export function AIChatWorkspace() {
       // ignore storage errors
     }
   }, [uploadedFiles, storageKey]);
-
-  const activeRun = compareRuns.find((run: any) => run.id === activeRunId) || null;
-
-  const { mutateAsync: uploadDocs, isPending: isUploading } = useMutation({
-    mutationFn: (payload: { files: File[]; config: typeof chunkConfig }) =>
-      chatService.uploadCompare(userId || "anonymous", payload.files, payload.config),
-    onSuccess: (data) => {
-      const runs = data?.data?.runs || [];
-      if (runs.length > 0) {
-        setActiveRunId(runs[0].id);
-      }
-      queryClient.invalidateQueries({ queryKey: ["compare_history", userId] });
-    }
-  }, queryClient);
 
   const { mutateAsync: compareQuery, isPending: isComparingQuery } = useMutation({
     mutationFn: (payload: { runId: string; query: string; rerankingEnabled?: boolean; sourceFilter?: string | null; sourceFilters?: string[] | null }) =>
@@ -2427,6 +2526,59 @@ export function AIChatWorkspace() {
     }
   };
 
+  const renderToolButtons = () => (
+    <div className="smartchatbot-toolrail">
+      <Tooltip title="Cấu hình chunk">
+        <button
+          className="smartchatbot-toolbtn"
+          title="Cấu hình chunk"
+          aria-label="Cấu hình chunk"
+          onClick={() =>
+            setActiveToolSections((prev) =>
+              prev.includes("chunk")
+                ? prev.filter((key) => key !== "chunk")
+                : [...prev, "chunk"]
+            )
+          }
+        >
+          <SettingOutlined />
+        </button>
+      </Tooltip>
+      <Tooltip title="Xóa lịch sử">
+        <button
+          className="smartchatbot-toolbtn smartchatbot-toolbtn-danger"
+          title="Xóa lịch sử"
+          aria-label="Xóa lịch sử"
+          onClick={handleClearHistory}
+          disabled={isClearingHistory}
+        >
+          <HistoryOutlined />
+        </button>
+      </Tooltip>
+      <Tooltip title={showHistorySidebar ? "Ẩn lịch sử" : "Xem lịch sử chat"}>
+        <button
+          className={`smartchatbot-toolbtn ${showHistorySidebar ? "border-green-400 bg-green-50" : ""}`}
+          title={showHistorySidebar ? "Ẩn lịch sử" : "Xem lịch sử chat"}
+          aria-label={showHistorySidebar ? "Ẩn lịch sử" : "Xem lịch sử chat"}
+          onClick={() => setShowHistorySidebar((prev) => !prev)}
+        >
+          <FileTextOutlined />
+        </button>
+      </Tooltip>
+      <Tooltip title="Xóa vector store">
+        <button
+          className="smartchatbot-toolbtn smartchatbot-toolbtn-danger"
+          title="Xóa vector store"
+          aria-label="Xóa vector store"
+          onClick={handleClearVectorStore}
+          disabled={isClearingVector}
+        >
+          <DatabaseOutlined />
+        </button>
+      </Tooltip>
+    </div>
+  );
+
   const handleSendMessage = async () => {
     if (!input.trim()) return;
 
@@ -2445,8 +2597,6 @@ export function AIChatWorkspace() {
     setLastQuery(input);
     setInput("");
 
-    let graphAnswer = "";
-
     const appendGraphAnswer = (answer: string, sources?: Array<string | { filename?: string; pages?: Array<number | string> }>) => {
       const sourceLines = sources && sources.length > 0
         ? "\n\n" + sources.flatMap((source) => {
@@ -2458,7 +2608,6 @@ export function AIChatWorkspace() {
           }).join("\n")
         : "";
       const fullAnswer = `${answer}${sourceLines}`;
-      graphAnswer = fullAnswer;
       setGraphMessages((prev) => [
         ...prev,
         {
@@ -2556,7 +2705,7 @@ export function AIChatWorkspace() {
     <>
     <div className="min-h-screen flex flex-col smartchatbot-shell">
       <UserHeader />
-      <div className="flex-1 flex flex-col" style={{ minHeight: 0 }}>
+      <div className="flex-1 flex flex-col min-h-0">
         <div className="p-4 pb-0">
         <div className="mb-3 rounded-2xl smartchatbot-frame p-3">
           <div
@@ -2565,8 +2714,7 @@ export function AIChatWorkspace() {
           >
             <div className="flex items-center gap-2">
               <span
-                className="text-gray-400 transition-transform duration-200"
-                style={{ display: "inline-block", transform: docPanelOpen ? "rotate(90deg)" : "rotate(0deg)" }}
+                className={`text-gray-400 transition-transform duration-200 inline-block ${docPanelOpen ? "rotate-90" : "rotate-0"}`}
               >
                 ▶
               </span>
@@ -2580,6 +2728,8 @@ export function AIChatWorkspace() {
                 type="file"
                 accept=".pdf,.doc,.docx"
                 multiple
+                title="Tải tài liệu PDF, DOC, DOCX"
+                aria-label="Tải tài liệu PDF, DOC, DOCX"
                 onChange={(e) => {
                   const incoming = Array.from(e.target.files || []);
                   if (incoming.length === 0) return;
@@ -2632,7 +2782,7 @@ export function AIChatWorkspace() {
                   }
                   e.currentTarget.value = "";
                 }}
-                style={{ display: "none" }}
+                  className="hidden"
                 id="aiWorkspaceUploadInput"
               />
               <Button
@@ -2664,6 +2814,8 @@ export function AIChatWorkspace() {
                     <div key={`${item.file.name}_${idx}`} className="flex items-start gap-2 smartchatbot-file-row">
                       <input
                         type="checkbox"
+                        title={`Chọn đọc file ${item.file.name}`}
+                        aria-label={`Chọn đọc file ${item.file.name}`}
                         checked={item.enabled}
                         disabled={!!item.error}
                         onChange={(e) =>
@@ -2706,6 +2858,8 @@ export function AIChatWorkspace() {
                     <div key={`${item.name}_${idx}`} className="flex items-start gap-2 smartchatbot-file-row">
                       <input
                         type="checkbox"
+                        title={`Chọn sử dụng file đã upload ${item.name}`}
+                        aria-label={`Chọn sử dụng file đã upload ${item.name}`}
                         checked={item.selected}
                         onChange={(e) =>
                           setUploadedFiles((prev) =>
@@ -2733,144 +2887,131 @@ export function AIChatWorkspace() {
           </div>
           )}
         </div>
-        <div className="flex-1 rounded-2xl smartchatbot-frame flex min-h-0" style={{ height: "calc(100vh - 220px)" }}>
+        <div className="flex-1 rounded-2xl smartchatbot-frame flex min-h-0 h-[calc(100vh-220px)]">
           {/* Left tools */}
-          <div className="w-[280px] border-r border-gray-200 smartchatbot-panel p-3 flex flex-col gap-3">
-            <div className="smartchatbot-panel-header">Thanh công cụ</div>
-            <div className="text-xs smartchatbot-muted">Các thao tác nhanh và cấu hình</div>
-            <div className="flex-1 flex min-h-0 gap-3">
-              <div className="smartchatbot-toolrail">
-                <Tooltip title="Cấu hình chunk">
-                  <button
-                    className="smartchatbot-toolbtn"
-                    onClick={() =>
-                      setActiveToolSections((prev) =>
-                        prev.includes("chunk")
-                          ? prev.filter((key) => key !== "chunk")
-                          : [...prev, "chunk"]
-                      )
-                    }
-                  >
-                    <SettingOutlined />
-                  </button>
-                </Tooltip>
-                <Tooltip title="Xóa lịch sử">
-                  <button
-                    className="smartchatbot-toolbtn"
-                    onClick={handleClearHistory}
-                    disabled={isClearingHistory}
-                  >
-                    <HistoryOutlined />
-                  </button>
-                </Tooltip>
-                <Tooltip title={showHistorySidebar ? "Ẩn lịch sử" : "Xem lịch sử chat"}>
-                  <button
-                    className={`smartchatbot-toolbtn ${showHistorySidebar ? "border-green-400 bg-green-50" : ""}`}
-                    onClick={() => setShowHistorySidebar(prev => !prev)}
-                  >
-                    <FileTextOutlined />
-                  </button>
-                </Tooltip>
-                <Tooltip title="Xóa vector store">
-                  <button
-                    className="smartchatbot-toolbtn"
-                    onClick={handleClearVectorStore}
-                    disabled={isClearingVector}
-                  >
-                    <DatabaseOutlined />
-                  </button>
-                </Tooltip>
-              </div>
-              <div className="flex-1 min-h-0 overflow-auto pr-1">
-                <Collapse
-                  size="small"
-                  bordered={false}
-                  activeKey={activeToolSections}
-                  onChange={(keys) =>
-                    setActiveToolSections(Array.isArray(keys) ? keys : [keys])
-                  }
-                  items={[
-                    {
-                      key: "chunk",
-                      label: "Cấu hình chunk",
-                      children: (
-                        <div className="grid grid-cols-1 gap-2 text-xs">
-                          <label className="flex flex-col gap-1">
-                            Parent chunk size
-                            <input
-                              type="number"
-                              value={pendingChunkConfig.parent_chunk_size}
-                              min={200}
-                              onChange={(e) =>
-                                setPendingChunkConfig((prev) => ({
-                                  ...prev,
-                                  parent_chunk_size: Number(e.target.value),
-                                }))
-                              }
-                              className="border border-gray-300 rounded px-2 py-1"
-                            />
-                          </label>
-                          <label className="flex flex-col gap-1">
-                            Parent overlap
-                            <input
-                              type="number"
-                              value={pendingChunkConfig.parent_chunk_overlap}
-                              min={0}
-                              onChange={(e) =>
-                                setPendingChunkConfig((prev) => ({
-                                  ...prev,
-                                  parent_chunk_overlap: Number(e.target.value),
-                                }))
-                              }
-                              className="border border-gray-300 rounded px-2 py-1"
-                            />
-                          </label>
-                          <label className="flex flex-col gap-1">
-                            Child chunk size
-                            <input
-                              type="number"
-                              value={pendingChunkConfig.child_chunk_size}
-                              min={100}
-                              onChange={(e) =>
-                                setPendingChunkConfig((prev) => ({
-                                  ...prev,
-                                  child_chunk_size: Number(e.target.value),
-                                }))
-                              }
-                              className="border border-gray-300 rounded px-2 py-1"
-                            />
-                          </label>
-                          <label className="flex flex-col gap-1">
-                            Child overlap
-                            <input
-                              type="number"
-                              value={pendingChunkConfig.child_chunk_overlap}
-                              min={0}
-                              onChange={(e) =>
-                                setPendingChunkConfig((prev) => ({
-                                  ...prev,
-                                  child_chunk_overlap: Number(e.target.value),
-                                }))
-                              }
-                              className="border border-gray-300 rounded px-2 py-1"
-                            />
-                          </label>
-                          <button
-                            className="mt-1 w-full py-1.5 rounded-lg text-xs font-semibold text-white smartchatbot-cta hover:brightness-110 transition"
-                            onClick={() => {
-                              setChunkConfig(pendingChunkConfig);
-                              message.success("Đã áp dụng cấu hình chunk");
-                            }}
-                          >
-                            Apply
-                          </button>
-                        </div>
-                      ),
-                    },
-                  ]}
-                />
+          <div className={`${toolPanelOpen ? "w-[280px]" : "w-[78px]"} border-r border-gray-200 smartchatbot-panel p-3 flex flex-col gap-3 transition-all duration-200`}>
+            <div
+              className="flex items-center justify-between gap-2 cursor-pointer select-none"
+              onClick={() => setToolPanelOpen((prev) => !prev)}
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <span
+                  className={`text-gray-400 transition-transform duration-200 inline-block ${toolPanelOpen ? "rotate-90" : "rotate-0"}`}
+                >
+                  ▶
+                </span>
+                {toolPanelOpen && <div className="smartchatbot-panel-header">Thanh công cụ</div>}
               </div>
             </div>
+
+            {toolPanelOpen && <div className="text-xs smartchatbot-muted"></div>}
+
+            {toolPanelOpen ? (
+              <div className="flex-1 flex min-h-0 gap-3">
+                {renderToolButtons()}
+                <div className="flex-1 min-h-0 overflow-auto pr-1">
+                  <Collapse
+                    size="small"
+                    bordered={false}
+                    activeKey={activeToolSections}
+                    onChange={(keys) =>
+                      setActiveToolSections(Array.isArray(keys) ? keys : [keys])
+                    }
+                    items={[
+                      {
+                        key: "chunk",
+                        label: "Cấu hình chunk",
+                        children: (
+                          <div className="grid grid-cols-1 gap-2 text-xs">
+                            <label className="flex flex-col gap-1">
+                              Parent chunk size
+                              <input
+                                type="number"
+                                title="Parent chunk size"
+                                aria-label="Parent chunk size"
+                                value={pendingChunkConfig.parent_chunk_size}
+                                min={200}
+                                onChange={(e) =>
+                                  setPendingChunkConfig((prev) => ({
+                                    ...prev,
+                                    parent_chunk_size: Number(e.target.value),
+                                  }))
+                                }
+                                className="border border-gray-300 rounded px-2 py-1"
+                              />
+                            </label>
+                            <label className="flex flex-col gap-1">
+                              Parent overlap
+                              <input
+                                type="number"
+                                title="Parent overlap"
+                                aria-label="Parent overlap"
+                                value={pendingChunkConfig.parent_chunk_overlap}
+                                min={0}
+                                onChange={(e) =>
+                                  setPendingChunkConfig((prev) => ({
+                                    ...prev,
+                                    parent_chunk_overlap: Number(e.target.value),
+                                  }))
+                                }
+                                className="border border-gray-300 rounded px-2 py-1"
+                              />
+                            </label>
+                            <label className="flex flex-col gap-1">
+                              Child chunk size
+                              <input
+                                type="number"
+                                title="Child chunk size"
+                                aria-label="Child chunk size"
+                                value={pendingChunkConfig.child_chunk_size}
+                                min={100}
+                                onChange={(e) =>
+                                  setPendingChunkConfig((prev) => ({
+                                    ...prev,
+                                    child_chunk_size: Number(e.target.value),
+                                  }))
+                                }
+                                className="border border-gray-300 rounded px-2 py-1"
+                              />
+                            </label>
+                            <label className="flex flex-col gap-1">
+                              Child overlap
+                              <input
+                                type="number"
+                                title="Child overlap"
+                                aria-label="Child overlap"
+                                value={pendingChunkConfig.child_chunk_overlap}
+                                min={0}
+                                onChange={(e) =>
+                                  setPendingChunkConfig((prev) => ({
+                                    ...prev,
+                                    child_chunk_overlap: Number(e.target.value),
+                                  }))
+                                }
+                                className="border border-gray-300 rounded px-2 py-1"
+                              />
+                            </label>
+                            <button
+                              className="mt-1 w-full py-1.5 rounded-lg text-xs font-semibold text-white smartchatbot-cta hover:brightness-110 transition"
+                              onClick={() => {
+                                setChunkConfig(pendingChunkConfig);
+                                message.success("Đã áp dụng cấu hình chunk");
+                              }}
+                            >
+                              Apply
+                            </button>
+                          </div>
+                        ),
+                      },
+                    ]}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="flex-1 flex justify-center">
+                {renderToolButtons()}
+              </div>
+            )}
           </div>
 
           {/* Middle: RAG + GraphRAG */}
@@ -3061,7 +3202,7 @@ export function AIChatWorkspace() {
               </div>
               <div className="p-2 border-t border-gray-100">
                 <button
-                  className="w-full py-1.5 text-xs text-red-500 hover:bg-red-50 rounded-lg transition"
+                  className="w-full py-1.5 text-xs text-red-600 hover:text-red-700 hover:bg-red-100 rounded-lg transition disabled:text-red-300"
                   onClick={handleClearHistory}
                   disabled={isClearingHistory}
                 >
@@ -3081,7 +3222,7 @@ export function AIChatWorkspace() {
         <div className="px-4 py-3 border-b border-gray-200 bg-white rounded-t-2xl flex items-center justify-between">
           <div>
             <div className="text-sm font-semibold">So sánh PaCRAG vs GraphRAG</div>
-            <div className="text-[11px] text-gray-400 mt-0.5">Kết quả được cập nhật tự động sau mỗi câu hỏi</div>
+            <div className="text-[11px] text-gray-400 mt-0.5"></div>
           </div>
           {isComparingQuery && (
             <div className="flex items-center gap-2 text-xs text-blue-500">
@@ -3111,29 +3252,42 @@ export function AIChatWorkspace() {
                     <tr className="bg-gray-50 text-gray-500 text-[11px] uppercase tracking-wide">
                       <th className="text-left px-3 py-2 font-medium border-b border-gray-200 w-[30%]">Câu hỏi</th>
                       <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-blue-600">PaC Time</th>
-                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-blue-600">PaC Relevance</th>
-                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-blue-600">PaC Confidence</th>
+                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-blue-600">
+                        <Tooltip title={METRIC_TOOLTIP_TEXT.relevance_score}>
+                          <span className="inline-flex items-center gap-1 cursor-help">PaC Relevance <QuestionCircleOutlined /></span>
+                        </Tooltip>
+                      </th>
+                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-blue-600">
+                        <Tooltip title={METRIC_TOOLTIP_TEXT.source_coverage}>
+                          <span className="inline-flex items-center gap-1 cursor-help">PaC Coverage <QuestionCircleOutlined /></span>
+                        </Tooltip>
+                      </th>
+                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-blue-600">
+                        <Tooltip title={METRIC_TOOLTIP_TEXT.confidence_score}>
+                          <span className="inline-flex items-center gap-1 cursor-help">PaC Confidence <QuestionCircleOutlined /></span>
+                        </Tooltip>
+                      </th>
                       <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-purple-600">Graph Time</th>
-                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-purple-600">Graph Relevance</th>
-                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-purple-600">Graph Confidence</th>
-                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-gray-400">Thắng</th>
+                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-purple-600">
+                        <Tooltip title={METRIC_TOOLTIP_TEXT.relevance_score}>
+                          <span className="inline-flex items-center gap-1 cursor-help">Graph Relevance <QuestionCircleOutlined /></span>
+                        </Tooltip>
+                      </th>
+                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-purple-600">
+                        <Tooltip title={METRIC_TOOLTIP_TEXT.source_coverage}>
+                          <span className="inline-flex items-center gap-1 cursor-help">Graph Coverage <QuestionCircleOutlined /></span>
+                        </Tooltip>
+                      </th>
+                      <th className="text-center px-2 py-2 font-medium border-b border-gray-200 text-purple-600">
+                        <Tooltip title={METRIC_TOOLTIP_TEXT.confidence_score}>
+                          <span className="inline-flex items-center gap-1 cursor-help">Graph Confidence <QuestionCircleOutlined /></span>
+                        </Tooltip>
+                      </th>
                       <th className="px-2 py-2 border-b border-gray-200"></th>
                     </tr>
                   </thead>
                   <tbody>
                     {queryRuns.map((run: any) => {
-                      const hasQuery = !!(run.pac_query || run.graphrag_query);
-                      const pacWins = hasQuery && (
-                        (isBetter("relevance_score", "pac", run.pac_query, run.graphrag_query) ? 1 : 0) +
-                        (isBetter("time_total_s", "pac", run.pac_query, run.graphrag_query) ? 1 : 0) +
-                        (isBetter("source_coverage", "pac", run.pac_query, run.graphrag_query) ? 1 : 0)
-                      );
-                      const graphWins = hasQuery && (
-                        (isBetter("relevance_score", "graph", run.pac_query, run.graphrag_query) ? 1 : 0) +
-                        (isBetter("time_total_s", "graph", run.pac_query, run.graphrag_query) ? 1 : 0) +
-                        (isBetter("source_coverage", "graph", run.pac_query, run.graphrag_query) ? 1 : 0)
-                      );
-                      const winner = !hasQuery ? null : pacWins > graphWins ? "pac" : graphWins > pacWins ? "graph" : "tie";
                       return (
                         <tr
                           key={run.id}
@@ -3159,6 +3313,11 @@ export function AIChatWorkspace() {
                               : <span className="text-gray-300">-</span>}
                           </td>
                           <td className="text-center px-2 py-2">
+                            {run.pac_query?.source_coverage != null
+                              ? <span className={`font-medium ${isBetter("source_coverage", "pac", run.pac_query, run.graphrag_query) ? "text-green-600" : "text-gray-600"}`}>{(run.pac_query.source_coverage * 100).toFixed(1)}%</span>
+                              : <span className="text-gray-300">-</span>}
+                          </td>
+                          <td className="text-center px-2 py-2">
                             <ConfidenceBadge score={run.pac_query?.confidence_score} />
                           </td>
                           {/* Graph metrics */}
@@ -3173,18 +3332,16 @@ export function AIChatWorkspace() {
                               : <span className="text-gray-300">-</span>}
                           </td>
                           <td className="text-center px-2 py-2">
-                            <ConfidenceBadge score={run.graphrag_query?.confidence_score} />
+                            {run.graphrag_query?.source_coverage != null
+                              ? <span className={`font-medium ${isBetter("source_coverage", "graph", run.pac_query, run.graphrag_query) ? "text-green-600" : "text-gray-600"}`}>{(run.graphrag_query.source_coverage * 100).toFixed(1)}%</span>
+                              : <span className="text-gray-300">-</span>}
                           </td>
-                          {/* Winner */}
                           <td className="text-center px-2 py-2">
-                            {winner === "pac" && <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-100 text-blue-700">PaC</span>}
-                            {winner === "graph" && <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-purple-100 text-purple-700">Graph</span>}
-                            {winner === "tie" && <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-100 text-gray-500">Tie</span>}
-                            {!winner && <span className="text-gray-300 text-[10px]">Chưa có</span>}
+                            <ConfidenceBadge score={run.graphrag_query?.confidence_score} />
                           </td>
                           <td className="px-2 py-2">
                             <button
-                              className="text-red-400 hover:text-red-600 text-[10px] whitespace-nowrap"
+                              className="text-red-600 hover:text-red-700 font-semibold text-[10px] whitespace-nowrap"
                               onClick={(e) => { e.stopPropagation(); handleDeleteCompareRun(run.id); }}
                             >
                               Xóa
@@ -3282,6 +3439,7 @@ export function AIChatWorkspace() {
                           </div>
                         )}
                         {(activeRun.pac_query || activeRun.graphrag_query) && !isComparingQuery && (
+                          <>
                           <div className="grid grid-cols-2 gap-4">
                             <div>
                               <div className="flex items-center gap-1.5 mb-2">
@@ -3292,13 +3450,13 @@ export function AIChatWorkspace() {
                                 )}
                               </div>
                               <div className="space-y-1.5">
-                                <MetricRow label="Thời gian" value={activeRun.pac_query?.time_total_s != null ? `${activeRun.pac_query.time_total_s}s` : null} better={isBetter("time_total_s", "pac", activeRun.pac_query, activeRun.graphrag_query)} lowerIsBetter />
+                                <MetricRow label="Thời gian" value={activeRun.pac_query?.time_total_s != null ? `${activeRun.pac_query.time_total_s}s` : null} better={isBetter("time_total_s", "pac", activeRun.pac_query, activeRun.graphrag_query)} />
                                 <MetricRow label="Tokens" value={activeRun.pac_query?.answer_tokens != null ? String(activeRun.pac_query.answer_tokens) : null} />
                                 <MetricRow label="Số từ" value={activeRun.pac_query?.word_count != null ? String(activeRun.pac_query.word_count) : null} better={isBetter("word_count", "pac", activeRun.pac_query, activeRun.graphrag_query)} />
-                                <MetricRow label="Relevance" value={activeRun.pac_query?.relevance_score != null ? activeRun.pac_query.relevance_score.toFixed(4) : null} better={isBetter("relevance_score", "pac", activeRun.pac_query, activeRun.graphrag_query)} />
-                                <MetricRow label="Coverage" value={activeRun.pac_query?.source_coverage != null ? `${(activeRun.pac_query.source_coverage * 100).toFixed(1)}%` : null} better={isBetter("source_coverage", "pac", activeRun.pac_query, activeRun.graphrag_query)} />
+                                <MetricRow label="Relevance" labelTooltipText={METRIC_TOOLTIP_TEXT.relevance_score} value={activeRun.pac_query?.relevance_score != null ? activeRun.pac_query.relevance_score.toFixed(4) : null} better={isBetter("relevance_score", "pac", activeRun.pac_query, activeRun.graphrag_query)} />
+                                <MetricRow label="Coverage" labelTooltipText={METRIC_TOOLTIP_TEXT.source_coverage} value={activeRun.pac_query?.source_coverage != null ? `${(activeRun.pac_query.source_coverage * 100).toFixed(1)}%` : null} better={isBetter("source_coverage", "pac", activeRun.pac_query, activeRun.graphrag_query)} />
                                 <div className="flex items-center justify-between py-0.5">
-                                  <span className="text-gray-500">Confidence</span>
+                                  <MetricLabelWithTooltip label="Confidence" tooltipText={METRIC_TOOLTIP_TEXT.confidence_score} />
                                   <ConfidenceBadge score={activeRun.pac_query?.confidence_score} />
                                 </div>
                                 {activeRun.pac_query?.reranking_scores && activeRun.pac_query.reranking_scores.length > 0 && (
@@ -3325,13 +3483,13 @@ export function AIChatWorkspace() {
                                 )}
                               </div>
                               <div className="space-y-1.5">
-                                <MetricRow label="Thời gian" value={activeRun.graphrag_query?.time_total_s != null ? `${activeRun.graphrag_query.time_total_s}s` : null} better={isBetter("time_total_s", "graph", activeRun.pac_query, activeRun.graphrag_query)} lowerIsBetter />
+                                <MetricRow label="Thời gian" value={activeRun.graphrag_query?.time_total_s != null ? `${activeRun.graphrag_query.time_total_s}s` : null} better={isBetter("time_total_s", "graph", activeRun.pac_query, activeRun.graphrag_query)} />
                                 <MetricRow label="Tokens" value={activeRun.graphrag_query?.answer_tokens != null ? String(activeRun.graphrag_query.answer_tokens) : null} />
                                 <MetricRow label="Số từ" value={activeRun.graphrag_query?.word_count != null ? String(activeRun.graphrag_query.word_count) : null} better={isBetter("word_count", "graph", activeRun.pac_query, activeRun.graphrag_query)} />
-                                <MetricRow label="Relevance" value={activeRun.graphrag_query?.relevance_score != null ? activeRun.graphrag_query.relevance_score.toFixed(4) : null} better={isBetter("relevance_score", "graph", activeRun.pac_query, activeRun.graphrag_query)} />
-                                <MetricRow label="Coverage" value={activeRun.graphrag_query?.source_coverage != null ? `${(activeRun.graphrag_query.source_coverage * 100).toFixed(1)}%` : null} better={isBetter("source_coverage", "graph", activeRun.pac_query, activeRun.graphrag_query)} />
+                                <MetricRow label="Relevance" labelTooltipText={METRIC_TOOLTIP_TEXT.relevance_score} value={activeRun.graphrag_query?.relevance_score != null ? activeRun.graphrag_query.relevance_score.toFixed(4) : null} better={isBetter("relevance_score", "graph", activeRun.pac_query, activeRun.graphrag_query)} />
+                                <MetricRow label="Coverage" labelTooltipText={METRIC_TOOLTIP_TEXT.source_coverage} value={activeRun.graphrag_query?.source_coverage != null ? `${(activeRun.graphrag_query.source_coverage * 100).toFixed(1)}%` : null} better={isBetter("source_coverage", "graph", activeRun.pac_query, activeRun.graphrag_query)} />
                                 <div className="flex items-center justify-between py-0.5">
-                                  <span className="text-gray-500">Confidence</span>
+                                  <MetricLabelWithTooltip label="Confidence" tooltipText={METRIC_TOOLTIP_TEXT.confidence_score} />
                                   <ConfidenceBadge score={activeRun.graphrag_query?.confidence_score} />
                                 </div>
                                 {activeRun.graphrag_query?.reranking_scores && activeRun.graphrag_query.reranking_scores.length > 0 && (
@@ -3350,6 +3508,129 @@ export function AIChatWorkspace() {
                               </div>
                             </div>
                           </div>
+
+                          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 mt-4">
+                            <div className="border border-gray-200 rounded-lg p-3 bg-gray-50">
+                              <div className="flex items-center justify-between mb-2">
+                                <div className="flex items-center gap-2 font-semibold text-blue-600">
+                                  <span className="w-2 h-2 rounded-full bg-blue-500 inline-block" />
+                                  <span>Retriever Metrics</span>
+                                </div>
+                                <Tooltip title={METRIC_TOOLTIP_TEXT.context_relevance}>
+                                  <QuestionCircleOutlined className="text-gray-400" />
+                                </Tooltip>
+                              </div>
+                              {retrieverChartData.length > 0 ? (
+                                <Column
+                                  data={retrieverChartData}
+                                  xField="metric"
+                                  yField="score"
+                                  seriesField="model"
+                                  isGroup
+                                  height={260}
+                                  yAxis={{ min: 0, max: 100, title: { text: "Điểm (%)" } }}
+                                  legend={{ position: "top" }}
+                                  tooltip={{
+                                    showTitle: true,
+                                    customContent: (_title, items) => {
+                                      const item = items?.[0]?.data as ChartMetricDatum | undefined;
+                                      if (!item) return "";
+                                      return `
+                                        <div style="padding:12px 14px; min-width:240px;">
+                                          <div style="font-weight:600; margin-bottom:4px;">${item.metric}</div>
+                                          <div style="font-size:12px; color:#6b7280; margin-bottom:8px; line-height:1.4;">${item.description}</div>
+                                          <div style="display:flex; justify-content:space-between; gap:12px; font-size:12px;">
+                                            <span>${item.model}</span>
+                                            <strong>${item.score.toFixed(1)}%</strong>
+                                          </div>
+                                        </div>
+                                      `;
+                                    },
+                                  }}
+                                  label={{
+                                    position: "top",
+                                    style: { fontSize: 10 },
+                                    formatter: (datum: ChartMetricDatum) => `${datum.score.toFixed(0)}%`,
+                                  }}
+                                  colorField="model"
+                                  color={['#2563eb', '#9333ea']}
+                                />
+                              ) : (
+                                <div className="h-[260px] flex items-center justify-center text-gray-400 text-xs">
+                                  Chưa có đủ dữ liệu Retriever metrics để hiển thị biểu đồ.
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="border border-gray-200 rounded-lg p-3 bg-gray-50">
+                              <div className="flex items-center justify-between mb-2">
+                                <div className="flex items-center gap-2 font-semibold text-purple-600">
+                                  <span className="w-2 h-2 rounded-full bg-purple-500 inline-block" />
+                                  <span>Generator Metrics</span>
+                                </div>
+                                <Tooltip title={METRIC_TOOLTIP_TEXT.faithfulness_groundedness}>
+                                  <QuestionCircleOutlined className="text-gray-400" />
+                                </Tooltip>
+                              </div>
+                              {generatorChartData.length > 0 ? (
+                                <Column
+                                  data={generatorChartData}
+                                  xField="metric"
+                                  yField="score"
+                                  seriesField="model"
+                                  isGroup
+                                  height={260}
+                                  yAxis={{ min: 0, max: 100, title: { text: "Điểm (%)" } }}
+                                  legend={{ position: "top" }}
+                                  tooltip={{
+                                    showTitle: true,
+                                    customContent: (_title, items) => {
+                                      const item = items?.[0]?.data as ChartMetricDatum | undefined;
+                                      if (!item) return "";
+                                      return `
+                                        <div style="padding:12px 14px; min-width:240px;">
+                                          <div style="font-weight:600; margin-bottom:4px;">${item.metric}</div>
+                                          <div style="font-size:12px; color:#6b7280; margin-bottom:8px; line-height:1.4;">${item.description}</div>
+                                          <div style="display:flex; justify-content:space-between; gap:12px; font-size:12px;">
+                                            <span>${item.model}</span>
+                                            <strong>${item.score.toFixed(1)}%</strong>
+                                          </div>
+                                        </div>
+                                      `;
+                                    },
+                                  }}
+                                  label={{
+                                    position: "top",
+                                    style: { fontSize: 10 },
+                                    formatter: (datum: ChartMetricDatum) => `${datum.score.toFixed(0)}%`,
+                                  }}
+                                  colorField="model"
+                                  color={['#2563eb', '#9333ea']}
+                                />
+                              ) : (
+                                <div className="h-[260px] flex items-center justify-center text-gray-400 text-xs">
+                                  Chưa có đủ dữ liệu Generator metrics để hiển thị biểu đồ.
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="mt-2 rounded-lg border border-dashed border-gray-200 bg-white/70 p-3 text-[10px] text-gray-500 space-y-2">
+                            <div className="font-semibold text-gray-600">Các tham số biểu đồ:</div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1.5 leading-relaxed">
+                              <div><span className="font-medium text-gray-600">Context Relevance:</span> Đo mức độ các đoạn truy xuất có thật sự liên quan đến câu hỏi.</div>
+                              <div><span className="font-medium text-gray-600">Context Recall:</span> Đo khả năng tìm đủ thông tin cần thiết trong kho tri thức để trả lời.</div>
+                              <div><span className="font-medium text-gray-600">Context Precision:</span> Đo việc các tài liệu liên quan có được xếp cao trong top-K kết quả hay không.</div>
+                              <div><span className="font-medium text-gray-600">Faithfulness/Groundedness:</span> Đo câu trả lời có bám sát ngữ cảnh truy xuất hay không, hạn chế hallucination.</div>
+                              <div><span className="font-medium text-gray-600">Answer Relevancy:</span> Đo câu trả lời có giải quyết trực tiếp câu hỏi của người dùng hay không.</div>
+                              <div><span className="font-medium text-gray-600">Answer Correctness:</span> Đo mức độ đúng của câu trả lời so với ground truth hoặc giá trị proxy tương ứng.</div>
+                            </div>
+                            <div>
+                                
+                            </div>
+                          </div>
+
+                          </>
                         )}
                       </div>
                     )}

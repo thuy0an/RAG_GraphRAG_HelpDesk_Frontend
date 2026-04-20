@@ -39,7 +39,7 @@ const AttachmentConfig = {
   }
 }
 
-export const useAttachmentStore = create((set: any) => (AttachmentConfig))
+export const useAttachmentStore = create(() => AttachmentConfig)
 
 export const STORAGE_TYPE = {
   SYSTEM: 'system'
