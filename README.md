@@ -6,13 +6,19 @@ Giao diện chatbot RAG cho hệ thống SmartDoc AI - Intelligent Document Q&A 
 
 ## Mục lục
 
-- [Tech Stack](#tech-stack)
-- [Yêu cầu](#yêu-cầu)
-- [Cài đặt](#cài-đặt)
-- [Biến môi trường](#biến-môi-trường)
-- [Chạy dev server](#chạy-dev-server)
-- [Cấu trúc thư mục](#cấu-trúc-thư-mục)
-- [Tính năng](#tính-năng)
+- [SmartDoc AI - Intelligent Document Q\&A System (Frontend)](#smartdoc-ai---intelligent-document-qa-system-frontend)
+  - [Mục lục](#mục-lục)
+  - [Tech Stack](#tech-stack)
+  - [Yêu cầu](#yêu-cầu)
+  - [Cài đặt](#cài-đặt)
+  - [Biến môi trường](#biến-môi-trường)
+  - [Chạy dev server](#chạy-dev-server)
+    - [Các lệnh khác](#các-lệnh-khác)
+  - [Cấu trúc thư mục](#cấu-trúc-thư-mục)
+  - [Tính năng](#tính-năng)
+    - [AIChatWorkspace (trang full-screen)](#aichatworkspace-trang-full-screen)
+    - [UserPortalChat (floating widget)](#userportalchat-floating-widget)
+  - [Giấy phép](#giấy-phép)
 
 ---
 
@@ -103,8 +109,22 @@ AI_HelpDesk_Frontend/
 │   │   └── (User)/
 │   │       └── user_portal/
 │   │           ├── index.astro                # Redirect -> /user_portal/smartchatbot
+│   │           ├── chat/                       # Chat feature modules (services/hooks/presentation)
+│   │           │   ├── AIChatComponent.tsx
+│   │           │   ├── NormalChatComponent.tsx
+│   │           │   ├── chatService.ts
+│   │           │   ├── hooks.ts
+│   │           │   ├── metrics.ts
+│   │           │   ├── presentation.tsx
+│   │           │   ├── types.ts
+│   │           │   └── components/compare/    # Compare UI components
+│   │           │       ├── CompareRunsTable.tsx
+│   │           │       ├── CompareRunDetailsCard.tsx
+│   │           │       ├── CompareResultTabs.tsx
+│   │           │       ├── RetrieverMetricsChart.tsx
+│   │           │       └── GeneratorMetricsChart.tsx
 │   │           ├── UserPortal.tsx             # Wrapper component
-│   │           ├── UserPortalChat.tsx         # Toàn bộ chatbot UI
+│   │           ├── UserPortalChat.tsx         # AI workspace + compare orchestration
 │   │           ├── ai/
 │   │           │   └── index.astro            # Redirect -> /user_portal/smartchatbot
 │   │           └── smartchatbot/
@@ -112,7 +132,8 @@ AI_HelpDesk_Frontend/
 │   ├── components/
 │   │   └── UserHeader.tsx                     # Header đơn giản (logo)
 │   ├── constants/
-│   │   └── constant.ts                        # API URLs, Zustand stores
+│   │   └── constant.ts                        # API URLs và hằng số môi trường
+│   ├── hooks/                                 # Reserved folder (hiện tại để trống)
 │   ├── layouts/
 │   │   ├── Rootlayout.astro                   # HTML shell + QueryProvider
 │   │   └── QueryProvider.tsx                  # TanStack Query provider
@@ -168,3 +189,11 @@ Widget chat nổi góc phải màn hình, tích hợp trong `UserPortal`.
 
 - Chế độ **AI**: chat với PaCRAG
 - Chế độ **Chat**: WebSocket real-time với agent
+
+---
+
+## Giấy phép
+
+Dự án được phát hành theo giấy phép **GNU General Public License v3.0 (GPL-3.0)**.
+
+- File giấy phép cấp dự án: [../LICENSE](../LICENSE)
