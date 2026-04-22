@@ -34,6 +34,7 @@ import {
 } from "./chat/metrics";
 import { CompareRunsTable } from "./chat/components/compare/CompareRunsTable";
 import { CompareRunDetailsCard } from "./chat/components/compare/CompareRunDetailsCard";
+import { RealtimeMetricsPanel } from "./chat/components/compare/RealtimeMetricsPanel";
 import {
   CitationModal,
   MessageBubble,
@@ -271,6 +272,16 @@ export function UserPortalChat() {
 export function AIChatWorkspace() {
   const userId = "anonymous";
   const storageKey = `smartchatbot_uploaded_files_anonymous`;
+  const maxFileSizeMB = Math.round(CONSTANT.MAX_FILE_SIZE / (1024 * 1024));
+
+  type ChunkConfigState = {
+    parent_chunk_size: number;
+    parent_chunk_overlap: number;
+    child_chunk_size: number;
+    child_chunk_overlap: number;
+    graph_chunk_size: number;
+    graph_chunk_overlap: number;
+  };
 
   const {
     historyMessages,
@@ -286,10 +297,11 @@ export function AIChatWorkspace() {
   const [activeToolSections, setActiveToolSections] = useState<string[]>(["upload", "chunk", "files"]);
   const [docPanelOpen, setDocPanelOpen] = useState(true);
   const [toolPanelOpen, setToolPanelOpen] = useState(true);
-  const [chunkConfig, setChunkConfig] = useState(() => ({
+  const [chunkConfig, setChunkConfig] = useState<ChunkConfigState>(() => ({
     ...BENCHMARK_TUNING_PRESET.pac_chunk_config,
+    ...BENCHMARK_TUNING_PRESET.graph_chunk_reference,
   }));
-  const [pendingChunkConfig, setPendingChunkConfig] = useState(chunkConfig);
+  const [pendingChunkConfig, setPendingChunkConfig] = useState<ChunkConfigState>(chunkConfig);
 
   const [graphMessages, setGraphMessages] = useState<Message[]>([]);
   const [ragMessages, setRagMessages] = useState<Message[]>([]);
@@ -401,7 +413,7 @@ export function AIChatWorkspace() {
   const [lastQuery, setLastQuery] = useState("");
   const [citationModal, setCitationModal] = useState<CitationModalState>({ open: false, passage: null, query: "" });
   const [compareTab, setCompareTab] = useState<CompareTab>("metrics");
-  const [rerankingEnabled, setRerankingEnabled] = useState(BENCHMARK_TUNING_PRESET.recommended_reranking_enabled);
+  const [rerankingEnabled, setRerankingEnabled] = useState<boolean>(BENCHMARK_TUNING_PRESET.recommended_reranking_enabled);
 
   const { data: compareHistory, isLoading: isCompareHistoryLoading } = useQuery({
     queryKey: ["compare_history", userId || "anonymous"],
@@ -836,15 +848,22 @@ export function AIChatWorkspace() {
                       if (existingKeys.has(key)) return;
                       const ext = file.name.split(".").pop()?.toLowerCase() || "";
                       const mime = (file.type || "").toLowerCase();
-                      const isSupported =
+                      const isSupportedType =
                         ["pdf", "doc", "docx"].includes(ext) ||
                         mime === "application/pdf" ||
                         mime === "application/msword" ||
                         mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+                      const isWithinSize = file.size <= CONSTANT.MAX_FILE_SIZE;
+                      const isSupported = isSupportedType && isWithinSize;
+                      const errorMessage = !isSupportedType
+                        ? "Định dạng không hỗ trợ"
+                        : !isWithinSize
+                          ? `Vượt quá ${maxFileSizeMB}MB/file`
+                          : undefined;
                       next.push({
                         file,
                         enabled: isSupported,
-                        error: isSupported ? undefined : "Định dạng không hỗ trợ",
+                        error: errorMessage,
                       });
                       if (isSupported) {
                         readyFiles.push(file);
@@ -857,18 +876,19 @@ export function AIChatWorkspace() {
                   const validFiles = incoming.filter((file) => {
                     const ext = file.name.split(".").pop()?.toLowerCase() || "";
                     const mime = (file.type || "").toLowerCase();
-                    return (
+                    const isSupportedType = (
                       ["pdf", "doc", "docx"].includes(ext) ||
                       mime === "application/pdf" ||
                       mime === "application/msword" ||
                       mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     );
+                    return isSupportedType && file.size <= CONSTANT.MAX_FILE_SIZE;
                   });
 
                   if (validFiles.length > 0) {
                     void handleUploadDocs(validFiles);
                   } else {
-                    message.error("Không có file hợp lệ để upload (chỉ hỗ trợ PDF, DOC, DOCX)");
+                    message.error(`Không có file hợp lệ để upload (PDF/DOC/DOCX, tối đa ${maxFileSizeMB}MB/file)`);
                   }
                   e.currentTarget.value = "";
                 }}
@@ -886,6 +906,9 @@ export function AIChatWorkspace() {
                 Chọn file
               </Button>
               {uploadStatus && <div className="smartchatbot-pill" onClick={(e) => e.stopPropagation()}>{uploadStatus}</div>}
+              <div className="text-xs smartchatbot-muted" onClick={(e) => e.stopPropagation()}>
+                Giới hạn dung lượng: tối đa {maxFileSizeMB}MB/file
+              </div>
               {files.length > 0 && (
                 <div className="text-xs smartchatbot-muted" onClick={(e) => e.stopPropagation()}>Đã chọn: {files.length} file</div>
               )}
@@ -1019,8 +1042,14 @@ export function AIChatWorkspace() {
                             <button
                               className="w-full py-1.5 rounded-lg text-xs font-semibold border border-emerald-300 text-emerald-700 hover:bg-emerald-50 transition"
                               onClick={() => {
-                                setPendingChunkConfig({ ...BENCHMARK_TUNING_PRESET.pac_chunk_config });
-                                setChunkConfig({ ...BENCHMARK_TUNING_PRESET.pac_chunk_config });
+                                setPendingChunkConfig({
+                                  ...BENCHMARK_TUNING_PRESET.pac_chunk_config,
+                                  ...BENCHMARK_TUNING_PRESET.graph_chunk_reference,
+                                });
+                                setChunkConfig({
+                                  ...BENCHMARK_TUNING_PRESET.pac_chunk_config,
+                                  ...BENCHMARK_TUNING_PRESET.graph_chunk_reference,
+                                });
                                 message.success("Đã áp dụng preset benchmark từ evaluation");
                               }}
                             >
@@ -1375,6 +1404,12 @@ export function AIChatWorkspace() {
           )}
         </div>
       </div>
+
+      <RealtimeMetricsPanel
+        runs={queryRuns}
+        activeRun={activeRun}
+        isLive={isStreaming || isComparingQuery || isGraphThinking}
+      />
     </div>
     <CitationModal state={citationModal} onClose={() => setCitationModal({ open: false, passage: null, query: "" })} />
     </>

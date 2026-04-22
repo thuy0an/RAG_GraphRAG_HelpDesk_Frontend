@@ -227,6 +227,8 @@ export class ChatService {
       parent_chunk_overlap?: number;
       child_chunk_size?: number;
       child_chunk_overlap?: number;
+      graph_chunk_size?: number;
+      graph_chunk_overlap?: number;
     }
   ) {
     const formData = new FormData();
@@ -244,6 +246,12 @@ export class ChatService {
     }
     if (chunkConfig.child_chunk_overlap) {
       formData.append("child_chunk_overlap", String(chunkConfig.child_chunk_overlap));
+    }
+    if (chunkConfig.graph_chunk_size) {
+      formData.append("graph_chunk_size", String(chunkConfig.graph_chunk_size));
+    }
+    if (chunkConfig.graph_chunk_overlap) {
+      formData.append("graph_chunk_overlap", String(chunkConfig.graph_chunk_overlap));
     }
 
     const response = await fetch(this.CHAT_URL.COMPARE_UPLOAD, {

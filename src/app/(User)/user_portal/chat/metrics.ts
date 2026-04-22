@@ -33,13 +33,13 @@ export interface LatencyBreakdownEntry {
 export const BENCHMARK_TUNING_PRESET = {
   pac_chunk_config: {
     parent_chunk_size: 1024,
-    parent_chunk_overlap: 200,
+    parent_chunk_overlap: 50,
     child_chunk_size: 128,
     child_chunk_overlap: 50,
   },
   graph_chunk_reference: {
-    chunk_size: 800,
-    chunk_overlap: 100,
+    graph_chunk_size: 800,
+    graph_chunk_overlap: 100,
   },
   retrieval_ensemble: {
     strategy: "Ensemble",
