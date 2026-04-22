@@ -47,18 +47,22 @@ export interface QueryMetrics {
   relevance_score?: number | null;
   source_coverage?: number | null;
   retrieved_chunk_count?: number | null;
+  retrieved_source_count?: number | null; // Added from evaluation results
   retrieved_chunks?: RetrievedPassage[];
   doc_passages?: RetrievedPassage[];
   sources?: { filename: string; pages: number[] }[];
   confidence_score?: number | null;
   reranking_scores?: number[] | null;
   reranking_time_s?: number | null;
+  latency_breakdown_json?: string | null; // Added from evaluation results
+  metric_groups_json?: string | null; // Added from evaluation results
   metric_groups?: {
     retrieval_metrics?: {
       context_relevance?: number | null;
       context_recall?: number | null;
       context_precision?: number | null;
       source_coverage?: number | null;
+      source_diversity?: number | null; // Added from PaCRAG evaluation
       reranking_summary?: {
         avg?: number | null;
       } | null;
@@ -69,6 +73,17 @@ export interface QueryMetrics {
       answer_correctness?: number | null;
       faithfulness_proxy?: number | null;
       answer_relevance_proxy?: number | null;
+    };
+    graph_metrics?: {
+      doc_passage_count?: number | null; // Added from GraphRAG evaluation
+      entity_count?: number | null; // Added from GraphRAG evaluation
+      graph_fact_count?: number | null; // Added from GraphRAG evaluation
+      source_count?: number | null; // Added from GraphRAG evaluation
+    };
+    system_metrics?: {
+      answer_tokens?: number | null; // Added from evaluation results
+      time_total_s?: number | null; // Added from evaluation results
+      word_count?: number | null; // Added from evaluation results
     };
   };
 }

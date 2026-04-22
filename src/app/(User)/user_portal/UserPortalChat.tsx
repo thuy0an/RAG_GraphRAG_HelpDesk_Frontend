@@ -22,6 +22,7 @@ import {
   useWebSocket,
 } from "./chat/hooks";
 import {
+  BENCHMARK_TUNING_PRESET,
   buildGeneratorChartData,
   buildRetrieverChartData,
   METRIC_TOOLTIP_TEXT,
@@ -285,12 +286,9 @@ export function AIChatWorkspace() {
   const [activeToolSections, setActiveToolSections] = useState<string[]>(["upload", "chunk", "files"]);
   const [docPanelOpen, setDocPanelOpen] = useState(true);
   const [toolPanelOpen, setToolPanelOpen] = useState(true);
-  const [chunkConfig, setChunkConfig] = useState({
-    parent_chunk_size: 2048,
-    parent_chunk_overlap: 400,
-    child_chunk_size: 512,
-    child_chunk_overlap: 100,
-  });
+  const [chunkConfig, setChunkConfig] = useState(() => ({
+    ...BENCHMARK_TUNING_PRESET.pac_chunk_config,
+  }));
   const [pendingChunkConfig, setPendingChunkConfig] = useState(chunkConfig);
 
   const [graphMessages, setGraphMessages] = useState<Message[]>([]);
@@ -403,7 +401,7 @@ export function AIChatWorkspace() {
   const [lastQuery, setLastQuery] = useState("");
   const [citationModal, setCitationModal] = useState<CitationModalState>({ open: false, passage: null, query: "" });
   const [compareTab, setCompareTab] = useState<CompareTab>("metrics");
-  const [rerankingEnabled, setRerankingEnabled] = useState(false);
+  const [rerankingEnabled, setRerankingEnabled] = useState(BENCHMARK_TUNING_PRESET.recommended_reranking_enabled);
 
   const { data: compareHistory, isLoading: isCompareHistoryLoading } = useQuery({
     queryKey: ["compare_history", userId || "anonymous"],
@@ -1015,6 +1013,19 @@ export function AIChatWorkspace() {
                         label: "Cấu hình chunk",
                         children: (
                           <div className="grid grid-cols-1 gap-2 text-xs">
+                            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-[11px] text-emerald-700">
+                              Preset benchmark: parent {BENCHMARK_TUNING_PRESET.pac_chunk_config.parent_chunk_size}, overlap {BENCHMARK_TUNING_PRESET.pac_chunk_config.parent_chunk_overlap}, child {BENCHMARK_TUNING_PRESET.pac_chunk_config.child_chunk_size}, overlap {BENCHMARK_TUNING_PRESET.pac_chunk_config.child_chunk_overlap}.
+                            </div>
+                            <button
+                              className="w-full py-1.5 rounded-lg text-xs font-semibold border border-emerald-300 text-emerald-700 hover:bg-emerald-50 transition"
+                              onClick={() => {
+                                setPendingChunkConfig({ ...BENCHMARK_TUNING_PRESET.pac_chunk_config });
+                                setChunkConfig({ ...BENCHMARK_TUNING_PRESET.pac_chunk_config });
+                                message.success("Đã áp dụng preset benchmark từ evaluation");
+                              }}
+                            >
+                              Dùng preset benchmark
+                            </button>
                             <label className="flex flex-col gap-1">
                               Parent chunk size
                               <input
@@ -1206,6 +1217,9 @@ export function AIChatWorkspace() {
                         Bật re-ranking
                       </span>
                     </label>
+                    <span className="text-[10px] text-emerald-600">
+                      Benchmark gợi ý: bật để tăng recall/correctness.
+                    </span>
                     {rerankingEnabled && (
                       <span className="text-[10px] text-orange-500">⚠ Chậm hơn</span>
                     )}

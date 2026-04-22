@@ -35,7 +35,7 @@ export function GeneratorMetricsChart({ data }: GeneratorMetricsChartProps) {
             showTitle: true,
             customContent: (_title: string, items?: Array<{ data?: ChartMetricDatum }>) => {
               const item = items?.[0]?.data;
-              if (!item) return "";
+              if (!item || item.score == null) return "";
               return `
                 <div style="padding:12px 14px; min-width:240px;">
                   <div style="font-weight:600; margin-bottom:4px;">${item.metric}</div>
@@ -51,7 +51,10 @@ export function GeneratorMetricsChart({ data }: GeneratorMetricsChartProps) {
           label={{
             position: "top",
             style: { fontSize: 10 },
-            formatter: (datum: ChartMetricDatum) => `${datum.score.toFixed(0)}%`,
+            formatter: (datum: ChartMetricDatum) => {
+              const score = datum?.score;
+              return score != null ? `${score.toFixed(0)}%` : "N/A";
+            },
           }}
           colorField="model"
           color={["#2563eb", "#9333ea"]}

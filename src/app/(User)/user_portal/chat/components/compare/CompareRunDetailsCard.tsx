@@ -1,5 +1,5 @@
 import { Spin } from "antd";
-import type { ChartMetricDatum } from "../../metrics";
+import { type ChartMetricDatum } from "../../metrics";
 import type { CompareRun, CompareTab, RetrievedPassage } from "../../types";
 import { CompareResultTabs } from "./CompareResultTabs";
 

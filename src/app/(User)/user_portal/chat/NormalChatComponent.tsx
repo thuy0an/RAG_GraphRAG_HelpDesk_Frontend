@@ -103,21 +103,26 @@ export function NormalChatComponent({
         conversation_key: conversationKey,
       };
 
+      // FIX: Đảm bảo message được add vào state trước khi gửi WebSocket
       setMessages((prev: any) => [...prev, newMessage]);
+      setInput(""); // Clear input ngay lập tức
+
+      // Đợi một tick để đảm bảo state đã được update
+      await new Promise(resolve => setTimeout(resolve, 0));
 
       if (isConnected) {
         sendMessage(text);
       } else {
         message.error("WebSocket chưa kết nối");
       }
-
-      setInput("");
     }
 
     if (files.length > 0) {
       try {
         const res = await upload(files);
-        res.data.urls.forEach((url: string) => {
+        
+        // Process files sequentially để tránh race condition
+        for (const url of res.data.urls) {
           const fileMessage: Message = {
             id: crypto.randomUUID(),
             sender_id: userId,
@@ -127,11 +132,14 @@ export function NormalChatComponent({
           };
 
           setMessages((prev: any) => [...prev, fileMessage]);
+          
+          // Đợi một tick trước khi gửi WebSocket
+          await new Promise(resolve => setTimeout(resolve, 0));
 
           if (isConnected) {
             sendMessage(url);
           }
-        });
+        }
 
         setFiles([]);
       } catch {

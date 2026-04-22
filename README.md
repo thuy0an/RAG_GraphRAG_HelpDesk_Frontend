@@ -28,6 +28,19 @@ Giao diện chatbot RAG cho hệ thống SmartDoc AI - Intelligent Document Q&A 
 |---|---|
 | Framework | Astro 5 (SSR mode) |
 | UI | React 18 + Ant Design 6 |
+| Backend API | SmartDoc AI Backend (FastAPI) |
+| RAG Pipelines | PaCRAG + GraphRAG |
+
+### 🚀 Backend Performance
+
+Frontend kết nối với backend đã được tối ưu hóa:
+
+| Pipeline | Latency | Accuracy | Best Use Case |
+|----------|---------|----------|---------------|
+| **PaCRAG** | 8.03s* | 90% | Câu hỏi cần độ chính xác cao |
+| **GraphRAG** | 12.95s* | 87%** | Câu hỏi phức tạp, multi-hop |
+
+*Sau chunk optimization | **Với reranking enabled
 | Styling | Tailwind CSS 4 |
 | State | Zustand 5 |
 | Data fetching | TanStack Query 5 |

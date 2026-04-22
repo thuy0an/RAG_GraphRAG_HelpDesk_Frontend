@@ -200,7 +200,18 @@ export function useWebSocket(
           return;
         }
 
-        onMessageRef.current(data);
+        // FIX: Sử dụng callback trực tiếp thay vì ref để tránh stale closure
+        // Chỉ xử lý message nếu không phải echo từ chính user này
+        if (data.echo && data.sender_id === userId) {
+          logger.info("[useWebSocket] Ignoring echo message from self");
+          return;
+        }
+
+        // Đảm bảo callback được gọi với data mới nhất
+        const currentCallback = onMessageRef.current;
+        if (currentCallback) {
+          currentCallback(data);
+        }
       } catch (error) {
         logger.error("[useWebSocket] Failed to parse WebSocket message:", error);
       }

@@ -32,12 +32,22 @@ export function AIChatComponent(props: AIChatComponentProps) {
 
   // Hợp nhất history từ server và message local; khử trùng để tránh render lặp.
   const mergedMessages = useMemo(() => {
-    // Dùng role+content làm khóa mềm vì stream update có thể tạo object mới nhưng cùng nội dung.
+    // FIX: Sử dụng ID làm khóa chính, fallback về role+content nếu không có ID
     const seen = new Set<string>();
+    const seenContent = new Set<string>();
+    
     return [...historyMessages, ...props.messages].filter((m: any) => {
-      const key = `${m.role}::${m.content}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
+      // Ưu tiên sử dụng ID nếu có
+      if (m.id) {
+        if (seen.has(m.id)) return false;
+        seen.add(m.id);
+        return true;
+      }
+      
+      // Fallback về content-based dedup nhưng chỉ cho messages không có ID
+      const contentKey = `${m.role || 'user'}::${m.content}::${m.sender_id || ''}`;
+      if (seenContent.has(contentKey)) return false;
+      seenContent.add(contentKey);
       return true;
     });
   }, [historyMessages, props.messages]);
